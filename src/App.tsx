@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppConfig, loadConfig, saveConfig } from './services/config';
-import { convertImageToMarkdown } from './services/llm';
+import { convertImageToMarkdown, convertAudioToMarkdown } from './services/llm';
 import { renderPdfPages } from './utils/pdf';
+import { getFileKind, getAudioMimeType } from './utils/fileKind';
 import ImageUploader from './components/ImageUploader';
 import ImagePreview from './components/ImagePreview';
 import StatusBar from './components/StatusBar';
@@ -18,7 +19,7 @@ export default function App() {
   const [isMaximized, setIsMaximized] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [convertingPage, setConvertingPage] = useState<{ current: number; total: number } | null>(null);
-  const [batchFiles, setBatchFiles] = useState<Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' } | null>>([]);
+  const [batchFiles, setBatchFiles] = useState<Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' } | null>>([]);
   const [currentFileIndex, setCurrentFileIndex] = useState(0);
   const [batchStatus, setBatchStatus] = useState<'idle' | 'processing' | 'done' | 'error'>('idle');
   const [filesConverted, setFilesConverted] = useState(0);
@@ -101,7 +102,22 @@ export default function App() {
     setShowConflictDialog(false);
   }, []);
 
-  const handleFilesSelected = useCallback((files: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' }>) => {
+  const handleAudioLoaded = useCallback((dataUri: string, filename: string) => {
+    setPages([dataUri]);
+    setCurrentPage(0);
+    setError(null);
+    setBatchFiles([]);
+    setBatchStatus('idle');
+    setFilesConverted(0);
+    setFilesSkipped(0);
+    setFilesFailed(0);
+    setCurrentFilename(filename);
+    setConflictStrategy(null);
+    setExistingFiles([]);
+    setShowConflictDialog(false);
+  }, []);
+
+  const handleFilesSelected = useCallback((files: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' }>) => {
     setPages([]);
     setCurrentPage(0);
     setError(null);
@@ -133,7 +149,7 @@ export default function App() {
     setShowConflictDialog(false);
   }, []);
 
-  const loadPagesFromPath = useCallback(async (filePath: string, fileType: 'image' | 'pdf'): Promise<string[]> => {
+  const loadPagesFromPath = useCallback(async (filePath: string, fileType: 'image' | 'pdf' | 'audio'): Promise<string[]> => {
     if (!filePath) return [];
 
     if (fileType === 'pdf') {
@@ -198,29 +214,45 @@ export default function App() {
 
             let fileResult = '';
 
-            for (let p = 0; p < pages.length; p++) {
-              if (abortController.signal.aborted) break;
-
-              setConvertingPage({ current: p + 1, total: pages.length });
-
+            if (file.fileType === 'audio') {
               currentPartialRef.current = '';
-              const pageStreamCallback = createStreamCallback(pages.length);
+              const streamCallback = createStreamCallback(1);
 
-              const pageResult = await convertImageToMarkdown(
+              fileResult = await convertAudioToMarkdown(
                 config,
-                pages[p],
-                pageStreamCallback,
+                pages[0],
+                getAudioMimeType(file.filename),
+                streamCallback,
                 abortController.signal,
               );
 
-              fileResult += pageResult;
               currentPartialRef.current = '';
-
-              if (p < pages.length - 1) {
-                fileResult += '\n\n---\n\n';
-              }
-
               setLiveOutput(fileResult);
+            } else {
+              for (let p = 0; p < pages.length; p++) {
+                if (abortController.signal.aborted) break;
+
+                setConvertingPage({ current: p + 1, total: pages.length });
+
+                currentPartialRef.current = '';
+                const pageStreamCallback = createStreamCallback(pages.length);
+
+                const pageResult = await convertImageToMarkdown(
+                  config,
+                  pages[p],
+                  pageStreamCallback,
+                  abortController.signal,
+                );
+
+                fileResult += pageResult;
+                currentPartialRef.current = '';
+
+                if (p < pages.length - 1) {
+                  fileResult += '\n\n---\n\n';
+                }
+
+                setLiveOutput(fileResult);
+              }
             }
 
             if (!abortController.signal.aborted && fileResult && outputFolder) {
@@ -260,30 +292,47 @@ export default function App() {
               setConvertingPage({ current: 1, total: pages.length });
 
               let fullResult = '';
+              const kind = getFileKind(currentFilename);
 
-              for (let i = 0; i < pages.length; i++) {
-                if (abortController.signal.aborted) break;
-
-                setConvertingPage({ current: i + 1, total: pages.length });
-
+              if (kind === 'audio') {
                 currentPartialRef.current = '';
-                const pageStreamCallback = createStreamCallback(pages.length);
+                const streamCallback = createStreamCallback(1);
 
-                const pageResult = await convertImageToMarkdown(
+                fullResult = await convertAudioToMarkdown(
                   config,
-                  pages[i],
-                  pageStreamCallback,
+                  pages[0],
+                  getAudioMimeType(currentFilename),
+                  streamCallback,
                   abortController.signal,
                 );
 
-                fullResult += pageResult;
                 currentPartialRef.current = '';
-
-                if (i < pages.length - 1) {
-                  fullResult += '\n\n---\n\n';
-                }
-
                 setLiveOutput(fullResult);
+              } else {
+                for (let i = 0; i < pages.length; i++) {
+                  if (abortController.signal.aborted) break;
+
+                  setConvertingPage({ current: i + 1, total: pages.length });
+
+                  currentPartialRef.current = '';
+                  const pageStreamCallback = createStreamCallback(pages.length);
+
+                  const pageResult = await convertImageToMarkdown(
+                    config,
+                    pages[i],
+                    pageStreamCallback,
+                    abortController.signal,
+                  );
+
+                  fullResult += pageResult;
+                  currentPartialRef.current = '';
+
+                  if (i < pages.length - 1) {
+                    fullResult += '\n\n---\n\n';
+                  }
+
+                  setLiveOutput(fullResult);
+                }
               }
 
               if (!abortController.signal.aborted && fullResult) {
@@ -383,7 +432,7 @@ export default function App() {
   return (
     <div className="container">
       <div className={`top-bar ${isMac ? 'top-bar--mac' : ''}`}>
-        <h1>Paper → Digital Converter</h1>
+        <h1>Media → Markdown Converter</h1>
         <div className="top-bar__controls">
           <button className="btn-secondary" onClick={() => setShowConfig(true)}>
             Settings
@@ -446,7 +495,7 @@ export default function App() {
                         }}
                       >
                         <span className="batch-file__name">{file?.filename ?? 'Failed to load'}</span>
-                        <span className="batch-file__pages">{file ? (file.fileType === 'pdf' ? 'PDF' : 'Image') : 'Failed'}</span>
+                        <span className="batch-file__pages">{file ? (file.fileType === 'pdf' ? 'PDF' : file.fileType === 'audio' ? 'Audio' : 'Image') : 'Failed'}</span>
                       </div>
                     ))}
                   </div>
@@ -455,6 +504,7 @@ export default function App() {
                 <ImageUploader
                   onImageSelect={handleImageLoaded}
                   onPdfSelect={handlePdfLoaded}
+                  onAudioSelect={handleAudioLoaded}
                   onFilesSelected={handleFilesSelected}
                   onLoadingState={setPdfLoading}
                   onError={setError}
@@ -463,6 +513,7 @@ export default function App() {
                 <ImageUploader
                   onImageSelect={handleImageLoaded}
                   onPdfSelect={handlePdfLoaded}
+                  onAudioSelect={handleAudioLoaded}
                   onFilesSelected={handleFilesSelected}
                   onLoadingState={setPdfLoading}
                   onError={setError}
@@ -517,7 +568,7 @@ export default function App() {
                       }}
                     >
                       <span className="batch-file__name">{file?.filename ?? 'Failed to load'}</span>
-                      <span className="batch-file__pages">{file ? (file.fileType === 'pdf' ? 'PDF' : 'Image') : 'Failed'}</span>
+                      <span className="batch-file__pages">{file ? (file.fileType === 'pdf' ? 'PDF' : file.fileType === 'audio' ? 'Audio' : 'Image') : 'Failed'}</span>
                     </div>
                   ))}
                 </div>
@@ -526,6 +577,7 @@ export default function App() {
               <ImageUploader
                 onImageSelect={handleImageLoaded}
                 onPdfSelect={handlePdfLoaded}
+                onAudioSelect={handleAudioLoaded}
                 onFilesSelected={handleFilesSelected}
                 onLoadingState={setPdfLoading}
                 onError={setError}
@@ -534,6 +586,7 @@ export default function App() {
               <ImageUploader
                 onImageSelect={handleImageLoaded}
                 onPdfSelect={handlePdfLoaded}
+                onAudioSelect={handleAudioLoaded}
                 onFilesSelected={handleFilesSelected}
                 onLoadingState={setPdfLoading}
                 onError={setError}

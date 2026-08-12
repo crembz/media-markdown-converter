@@ -3,7 +3,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 export interface Config {
   provider: string;
   model: string;
+  audioModel?: string;
   apiKey: string;
+  apiKeys?: Record<string, string>;
   baseUrl: string;
   useApiKey: boolean;
   availableModels: string[];

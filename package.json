@@ -1,16 +1,17 @@
 {
-  "name": "paper-digital-converter",
+  "name": "media-markdown-converter",
   "version": "0.7.0",
-  "description": "Convert paper notes to digital markdown using LLM vision",
+  "description": "Convert paper notes and audio recordings to markdown using LLM vision and audio models",
   "author": {
     "name": "Crembz",
     "email": "alex@muntedmongoose.com"
   },
   "main": "dist-electron/main.js",
   "bin": {
-    "paper-converter": "./bin/paper-converter"
+    "media-markdown-converter": "./bin/media-markdown-converter"
   },
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
     "dev": "vite",
     "build": "tsc && vite build && electron-builder --config electron-builder.yml --publish never",
     "build:linux": "tsc && vite build && electron-builder --config electron-builder.yml --linux --publish never",
@@ -37,6 +38,7 @@
     "@vitejs/plugin-react": "^4.2.1",
     "electron": "^28.3.3",
     "electron-builder": "^26.15.3",
+    "playwright-core": "^1.62.1",
     "typescript": "^5.3.3",
     "vite": "^5.0.8",
     "vite-plugin-electron": "^0.28.0",

@@ -487,6 +487,10 @@ input[type='file'] {
   text-align: right;
 }
 
+.image-preview__spacer {
+  margin-left: auto;
+}
+
 .image-preview__container {
   flex: 1;
   overflow: auto;

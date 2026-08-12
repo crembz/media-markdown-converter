@@ -1,12 +1,14 @@
 import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
-import { convertImageToMarkdown } from './services/llm';
+import { convertImageToMarkdown, convertAudioToMarkdown } from './services/llm';
 import { renderPdfPages } from './pdf-node';
+import { isAudioFile, getFileKind, getAudioMimeType } from './utils/fileKind';
 
 interface CliConfig {
   provider: string;
   model: string;
+  audioModel?: string;
   apiKey: string;
   baseUrl: string;
   useApiKey: boolean;
@@ -17,6 +19,7 @@ interface CliConfig {
 interface ConfigFile {
   provider?: string;
   model?: string;
+  audioModel?: string;
   apiKey?: string;
   baseUrl?: string;
   useApiKey?: boolean;
@@ -28,6 +31,7 @@ const PROVIDER_DEFAULTS: Record<string, Omit<ConfigFile, 'apiKey' | 'availableMo
   openai: {
     provider: 'openai',
     model: 'gpt-4o',
+    audioModel: 'gpt-4o-audio-preview',
     baseUrl: 'https://api.openai.com',
     useApiKey: true,
   },
@@ -52,6 +56,7 @@ const PROVIDER_DEFAULTS: Record<string, Omit<ConfigFile, 'apiKey' | 'availableMo
   gemini: {
     provider: 'gemini',
     model: 'gemini-2.5-flash',
+    audioModel: 'gemini-2.5-flash',
     baseUrl: 'https://generativelanguage.googleapis.com',
     useApiKey: true,
   },
@@ -64,13 +69,20 @@ const PROVIDER_DEFAULTS: Record<string, Omit<ConfigFile, 'apiKey' | 'availableMo
   mistral: {
     provider: 'mistral',
     model: 'pixtral-large-latest',
+    audioModel: 'voxtral-mini-latest',
     baseUrl: 'https://api.mistral.ai/v1',
+    useApiKey: true,
+  },
+  openrouter: {
+    provider: 'openrouter',
+    model: '',
+    baseUrl: 'https://openrouter.ai/api/v1',
     useApiKey: true,
   },
 };
 
 async function loadConfigFile(): Promise<ConfigFile | null> {
-  const configPath = path.join(process.cwd(), '.paper-converter.json');
+  const configPath = path.join(process.cwd(), '.media-markdown-converter.json');
   try {
     const data = await fs.promises.readFile(configPath, 'utf-8');
     return JSON.parse(data) as ConfigFile;
@@ -107,6 +119,10 @@ async function loadPages(filePath: string): Promise<string[]> {
     return [`data:${mimeType};base64,${base64}`];
   } else if (isPdfFile(filePath)) {
     return renderPdfPages(filePath);
+  } else if (isAudioFile(filePath)) {
+    const buffer = await fs.promises.readFile(filePath);
+    const base64 = buffer.toString('base64');
+    return [`data:${getAudioMimeType(filePath)};base64,${base64}`];
   } else {
     throw new Error(`Unsupported file type: ${filePath}`);
   }
@@ -115,12 +131,13 @@ async function loadPages(filePath: string): Promise<string[]> {
 export async function main() {
   const program = new Command();
   program
-    .name('paper-converter')
-    .description('Convert paper notes (images/PDFs) to markdown using LLM vision models')
+    .name('media-markdown-converter')
+    .description('Convert paper notes (images/PDFs) and audio recordings to markdown using LLM vision/audio models')
     .requiredOption('-f, --files <paths...>', 'Input image/PDF files')
     .requiredOption('-o, --output <dir>', 'Output directory for markdown files')
-    .option('-p, --provider <name>', 'LLM provider (openai, anthropic, lmstudio, gemini, ollama, mistral)')
+    .option('-p, --provider <name>', 'LLM provider (openai, anthropic, lmstudio, gemini, ollama, mistral, openrouter)')
     .option('-m, --model <name>', 'Model name')
+    .option('--audioModel <name>', 'Model name for audio transcription (openai, gemini, mistral, openrouter only)')
     .option('-k, --apiKey <key>', 'API key')
     .option('-b, --baseUrl <url>', 'API base URL')
     .option('--stream', 'Stream output to stdout')
@@ -135,7 +152,7 @@ export async function main() {
       process.exit(1);
     }
 
-    if (!isSupportedImage(file) && !isPdfFile(file)) {
+    if (!isSupportedImage(file) && !isPdfFile(file) && !isAudioFile(file)) {
       console.error(`Error: Unsupported file type: ${file}`);
       process.exit(1);
     }
@@ -161,6 +178,7 @@ export async function main() {
   const config: CliConfig = {
     provider: opts.provider || configFile?.provider || defaults.provider,
     model: opts.model || configFile?.model || defaults.model,
+    audioModel: opts.audioModel || configFile?.audioModel || defaults.audioModel,
     apiKey: opts.apiKey || configFile?.apiKey || '',
     baseUrl: opts.baseUrl || configFile?.baseUrl || defaults.baseUrl,
     useApiKey: configUseApiKey,
@@ -184,7 +202,7 @@ export async function main() {
 
   if (config.useApiKey && !config.apiKey) {
     console.error('Error: API key is required for this provider.');
-    console.error('Set it with --apiKey or in .paper-converter.json');
+    console.error('Set it with --apiKey or in .media-markdown-converter.json');
     process.exit(1);
   }
 
@@ -202,14 +220,11 @@ export async function main() {
       const pages = await loadPages(filePath);
       let fullResult = '';
 
-      for (let i = 0; i < pages.length; i++) {
-        if (pages.length > 1) {
-          console.log(`  Page ${i + 1}/${pages.length}`);
-        }
-
-        const pageResult = await convertImageToMarkdown(
+      if (getFileKind(filePath) === 'audio') {
+        fullResult = await convertAudioToMarkdown(
           config as never,
-          pages[i],
+          pages[0],
+          getAudioMimeType(filePath),
           (chunk) => {
             if (opts.stream) {
               process.stdout.write(chunk);
@@ -217,11 +232,28 @@ export async function main() {
           },
           new AbortController().signal,
         );
+      } else {
+        for (let i = 0; i < pages.length; i++) {
+          if (pages.length > 1) {
+            console.log(`  Page ${i + 1}/${pages.length}`);
+          }
 
-        fullResult += pageResult;
+          const pageResult = await convertImageToMarkdown(
+            config as never,
+            pages[i],
+            (chunk) => {
+              if (opts.stream) {
+                process.stdout.write(chunk);
+              }
+            },
+            new AbortController().signal,
+          );
 
-        if (i < pages.length - 1) {
-          fullResult += '\n\n---\n\n';
+          fullResult += pageResult;
+
+          if (i < pages.length - 1) {
+            fullResult += '\n\n---\n\n';
+          }
         }
       }
 

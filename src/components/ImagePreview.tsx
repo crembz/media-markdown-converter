@@ -26,9 +26,9 @@ function extractFilenameFromDataUri(dataUri: string): string | null {
   const mimeMatch = header.match(/data:([^;]+)/);
   if (mimeMatch && mimeMatch[1]) {
     const mime = mimeMatch[1];
-    const ext = mime.split('/').pop();
+    const [category, ext] = mime.split('/');
     if (ext) {
-      return `image.${ext}`;
+      return `${category || 'image'}.${ext}`;
     }
   }
 
@@ -47,6 +47,7 @@ export default function ImagePreview({ image, onReplace, totalPages, currentPage
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isMultiPage = totalPages && totalPages > 1;
+  const isAudio = image.startsWith('data:audio/');
 
   const filename = extractFilenameFromDataUri(image);
 
@@ -87,6 +88,24 @@ export default function ImagePreview({ image, onReplace, totalPages, currentPage
     setScale(1);
     setDimensions(null);
   }, [image]);
+
+  if (isAudio) {
+    return (
+      <div className="image-preview">
+        <div className="image-preview__toolbar">
+          {filename && <span className="image-preview__filename">{filename}</span>}
+          <span className="image-preview__spacer" />
+          <button type="button" className="btn-secondary" onClick={onReplace}>
+            Replace
+          </button>
+        </div>
+
+        <div className="image-preview__container">
+          <audio controls src={image} style={{ width: '100%', maxWidth: 480 }} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="image-preview">

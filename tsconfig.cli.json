@@ -15,7 +15,7 @@
     "src/cli.ts",
     "src/pdf-node.ts",
     "src/services/llm.ts",
-    "src/services/config.ts",
-    "src/utils/prompt.ts"
+    "src/utils/prompt.ts",
+    "src/utils/fileKind.ts"
   ]
 }

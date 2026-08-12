@@ -8,20 +8,72 @@ type ConfigPanelProps = {
   onClose: () => void;
 };
 
+const LOCAL_PROVIDERS: AppConfig['provider'][] = ['lmstudio', 'ollama'];
+
 const PROVIDER_OPTIONS: AppConfig['provider'][] = [
-  'openai',
-  'anthropic',
-  'openai-compatible',
-  'lmstudio',
-  'gemini',
-  'ollama',
-  'mistral',
+  ...LOCAL_PROVIDERS,
+  ...(['anthropic', 'gemini', 'mistral', 'openai', 'openai-compatible', 'openrouter'] as AppConfig['provider'][])
+    .filter((p) => !LOCAL_PROVIDERS.includes(p))
+    .sort(),
 ];
+
+const AUDIO_CAPABLE_PROVIDERS: AppConfig['provider'][] = ['openai', 'gemini', 'mistral', 'openrouter'];
+
+function sortModels(models: string[]): string[] {
+  return [...models].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+// Curated fallback when a provider's fetched catalog has no models with
+// "ocr" in the name (true for everyone except Mistral) — the best-known
+// vision-capable models per provider, in ranked order (not alphabetical).
+// Not derived from any live ranking API; update by hand as models change.
+const TOP_OCR_MODELS: Partial<Record<AppConfig['provider'], string[]>> = {
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini'],
+  anthropic: ['claude-opus-4-20250514', 'claude-sonnet-4-20250514', 'claude-3-7-sonnet-latest', 'claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
+  gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+  mistral: ['mistral-ocr-latest', 'pixtral-large-latest', 'pixtral-12b-latest', 'mistral-medium-latest', 'mistral-small-latest'],
+  openrouter: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-2.5-flash', 'mistralai/pixtral-large-latest', 'qwen/qwen2.5-vl-72b-instruct'],
+};
+
+function getOcrModelOptions(provider: AppConfig['provider'], models: string[]): string[] {
+  const ocrNamed = models.filter((m) => m.toLowerCase().includes('ocr'));
+  if (ocrNamed.length > 0) return ocrNamed;
+  return TOP_OCR_MODELS[provider] || [];
+}
+
+// Name fragments that indicate a model can process/transcribe audio.
+// "ocr" providers name their vision model plainly (gpt-4o, gemini-2.5-flash)
+// so there's no single keyword to reuse — audio-capable variants call it out
+// explicitly (gpt-4o-audio-preview, voxtral, whisper, gpt-4o-transcribe).
+const AUDIO_MODEL_KEYWORDS = ['audio', 'voxtral', 'whisper', 'transcribe'];
+
+// Curated fallback when a provider's fetched catalog has no models matching
+// AUDIO_MODEL_KEYWORDS — the best-known audio-capable models per provider,
+// in ranked order. Gemini has no distinctly-branded audio variant (the same
+// multimodal models take audio input), so it reuses the OCR list. Not
+// derived from any live ranking API; update by hand as models change.
+const TOP_AUDIO_MODELS: Partial<Record<AppConfig['provider'], string[]>> = {
+  openai: ['gpt-4o-audio-preview', 'gpt-4o-mini-audio-preview', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'],
+  gemini: TOP_OCR_MODELS.gemini,
+  mistral: ['voxtral-mini-latest', 'voxtral-small-latest', 'voxtral-mini-2602', 'voxtral-small-2507', 'voxtral-mini-transcribe-realtime-2602'],
+  openrouter: ['openai/gpt-4o-audio-preview', 'openai/whisper-1', 'mistralai/voxtral-small-latest', 'mistralai/voxtral-mini-latest', 'google/gemini-2.5-flash'],
+};
+
+function getAudioModelOptions(provider: AppConfig['provider'], models: string[]): string[] {
+  const audioNamed = models.filter((m) => {
+    const lower = m.toLowerCase();
+    return AUDIO_MODEL_KEYWORDS.some((k) => lower.includes(k));
+  });
+  if (audioNamed.length > 0) return audioNamed;
+  return TOP_AUDIO_MODELS[provider] || [];
+}
 
 export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {
   const [provider, setProvider] = useState<AppConfig['provider']>('openai');
   const [model, setModel] = useState('');
+  const [audioModel, setAudioModel] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [baseUrl, setBaseUrl] = useState('');
   const [useApiKey, setUseApiKey] = useState(true);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -30,11 +82,13 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [showManualModel, setShowManualModel] = useState(false);
+  const [showManualAudioModel, setShowManualAudioModel] = useState(false);
   const [outputFolder, setOutputFolder] = useState('');
   const syncDefaults = useCallback(
     (prov: AppConfig['provider']) => {
       const defaults = getDefaultConfig(prov);
       setModel(defaults.model);
+      setAudioModel(defaults.audioModel || '');
       setBaseUrl(defaults.baseUrl);
       setUseApiKey(defaults.useApiKey);
     },
@@ -45,14 +99,23 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     if (config) {
       setProvider(config.provider);
       setModel(config.model);
-      setApiKey(config.apiKey);
+      setAudioModel(config.audioModel || getDefaultConfig(config.provider).audioModel || '');
+      // Backward compat: configs saved before per-provider keys existed only
+      // have the legacy flat apiKey field — seed the map with it under the
+      // current provider so switching away and back still recalls it.
+      const keys = { ...(config.apiKeys || {}) };
+      if (config.apiKey && !keys[config.provider]) {
+        keys[config.provider] = config.apiKey;
+      }
+      setApiKeys(keys);
+      setApiKey(keys[config.provider] ?? config.apiKey ?? '');
       setBaseUrl(config.baseUrl);
       setUseApiKey(config.useApiKey);
     } else {
       syncDefaults('openai');
     }
     setErrors({});
-    setAvailableModels(config?.availableModels || []);
+    setAvailableModels(sortModels(config?.availableModels || []));
     setFetchError(null);
     setOutputFolder(config?.outputFolder || '');
   }, [config, syncDefaults]);
@@ -61,18 +124,27 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     const next = e.target.value as AppConfig['provider'];
     setProvider(next);
     syncDefaults(next);
+    // Recall this provider's previously-saved key, or blank the field if
+    // none was ever entered — API keys are per-provider, not shared state
+    // that should carry over when switching.
+    setApiKey(apiKeys[next] || '');
     setAvailableModels([]);
     setFetchError(null);
     setShowManualModel(false);
+    setShowManualAudioModel(false);
     setErrors({});
   };
+
+  const supportsAudio = AUDIO_CAPABLE_PROVIDERS.includes(provider);
+  const ocrModelOptions = getOcrModelOptions(provider, availableModels);
+  const audioModelOptions = supportsAudio ? getAudioModelOptions(provider, availableModels) : [];
 
   const handleFetchModels = async () => {
     setFetchingModels(true);
     setFetchError(null);
     try {
       const models = await fetchAvailableModels(provider, apiKey, baseUrl);
-      setAvailableModels(models);
+      setAvailableModels(sortModels(models));
       setFetchingModels(false);
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : 'Failed to fetch models');
@@ -95,6 +167,19 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     if (errors.model) setErrors(prev => ({ ...prev, model: '' }));
   };
 
+  const handleAudioModelSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    if (e.target.value === '__other__') {
+      setShowManualAudioModel(true);
+    } else {
+      setShowManualAudioModel(false);
+      setAudioModel(e.target.value);
+    }
+  };
+
+  const handleManualAudioModelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setAudioModel(e.target.value);
+  };
+
   const validate = (): boolean => {
     const next: Record<string, string> = {};
 
@@ -111,7 +196,17 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
 
   const handleSave = () => {
     if (!validate()) return;
-    onSave({ provider, model, apiKey, baseUrl, useApiKey, availableModels, outputFolder: outputFolder || undefined });
+    onSave({
+      provider,
+      model,
+      audioModel: supportsAudio ? (audioModel || undefined) : undefined,
+      apiKey,
+      apiKeys: { ...apiKeys, [provider]: apiKey },
+      baseUrl,
+      useApiKey,
+      availableModels,
+      outputFolder: outputFolder || undefined,
+    });
   };
 
   const handleClose = () => {
@@ -169,7 +264,9 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
               type={showApiKey ? 'text' : 'password'}
               value={apiKey}
               onChange={(e) => {
-                setApiKey(e.target.value);
+                const value = e.target.value;
+                setApiKey(value);
+                setApiKeys(prev => ({ ...prev, [provider]: value }));
                 if (errors.apiKey) setErrors(prev => ({ ...prev, apiKey: '' }));
               }}
               placeholder="sk-..."
@@ -194,16 +291,16 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
             {!showManualModel ? (
               <select
                 id="model"
-                value={availableModels.includes(model) ? model : '__custom__'}
+                value={ocrModelOptions.includes(model) ? model : '__custom__'}
                 onChange={handleModelSelect}
                 aria-invalid={!!errors.model}
               >
-                {availableModels.length > 0 && (
+                {ocrModelOptions.length > 0 && (
                   <option value="" disabled>
                     Select a model
                   </option>
                 )}
-                {availableModels.map((m) => (
+                {ocrModelOptions.map((m) => (
                   <option key={m} value={m}>
                     {m}
                   </option>
@@ -239,6 +336,51 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
             </div>
           )}
           {errors.model && <span className="error">{errors.model}</span>}
+          <span className="form-hint">
+            Limited to OCR-named models{availableModels.filter((m) => m.toLowerCase().includes('ocr')).length === 0 ? ' — none found, showing well-known vision-capable models instead' : ''}. Pick "Other..." to enter any model manually.
+          </span>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="audioModel">Audio Model</label>
+          {supportsAudio ? (
+            <>
+              <div className="model-row">
+                {!showManualAudioModel ? (
+                  <select
+                    id="audioModel"
+                    value={audioModelOptions.includes(audioModel) ? audioModel : '__custom__'}
+                    onChange={handleAudioModelSelect}
+                  >
+                    {audioModelOptions.length > 0 && (
+                      <option value="" disabled>
+                        Select a model
+                      </option>
+                    )}
+                    {audioModelOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                    <option value="__other__">Other...</option>
+                  </select>
+                ) : (
+                  <input
+                    id="audioModel"
+                    type="text"
+                    value={audioModel}
+                    onChange={handleManualAudioModelChange}
+                    placeholder="Model used for audio transcription"
+                  />
+                )}
+              </div>
+              <span className="form-hint">
+                Limited to audio/transcription-capable models{availableModels.filter((m) => AUDIO_MODEL_KEYWORDS.some((k) => m.toLowerCase().includes(k))).length === 0 ? ' — none found, showing well-known audio-capable models instead' : ''}. Pick "Other..." to enter any model manually.
+              </span>
+            </>
+          ) : (
+            <span className="form-hint">{provider} does not support audio transcription. Switch to OpenAI, Gemini, Mistral, or OpenRouter to transcribe audio.</span>
+          )}
         </div>
 
         <div className="form-group">

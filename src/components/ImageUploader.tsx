@@ -1,10 +1,12 @@
 import { useCallback, useState } from 'react';
 import { useDropzone, type DropzoneOptions } from 'react-dropzone';
+import { isAudioFile } from '../utils/fileKind';
 
 interface ImageUploaderProps {
   onImageSelect: (dataUri: string, filename: string) => void;
   onPdfSelect: (pages: string[], filename: string) => void;
-  onFilesSelected: (files: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' }>) => void;
+  onAudioSelect: (dataUri: string, filename: string) => void;
+  onFilesSelected: (files: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' }>) => void;
   onLoadingState: (loading: boolean) => void;
   onError?: (message: string) => void;
 }
@@ -15,6 +17,13 @@ const ACCEPTED_TYPES: Record<string, string[]> = {
   'image/tiff': ['.tiff', '.tif'],
   'image/webp': ['.webp'],
   'application/pdf': ['.pdf'],
+  'audio/mpeg': ['.mp3'],
+  'audio/wav': ['.wav'],
+  'audio/mp4': ['.m4a'],
+  'audio/flac': ['.flac'],
+  'audio/ogg': ['.ogg'],
+  'audio/webm': ['.webm'],
+  'audio/aac': ['.aac'],
 };
 
 function compressCanvas(canvas: HTMLCanvasElement, quality: number): string {
@@ -67,7 +76,7 @@ async function processUploadedImage(file: File, dataUri: string): Promise<string
   return dataUri;
 }
 
-export default function ImageUploader({ onImageSelect, onPdfSelect, onFilesSelected, onLoadingState, onError }: ImageUploaderProps) {
+export default function ImageUploader({ onImageSelect, onPdfSelect, onAudioSelect, onFilesSelected, onLoadingState, onError }: ImageUploaderProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,6 +94,9 @@ export default function ImageUploader({ onImageSelect, onPdfSelect, onFilesSelec
             onLoadingState(true);
             const pages = await (await import('../utils/pdf')).renderPdfPages(file);
             onPdfSelect(pages, file.name);
+          } else if (isAudioFile(file.name)) {
+            const dataUri = await readFileAsDataUri(file);
+            onAudioSelect(dataUri, file.name);
           } else {
             const dataUri = await readFileAsDataUri(file);
             const processed = await processUploadedImage(file, dataUri);
@@ -101,14 +113,15 @@ export default function ImageUploader({ onImageSelect, onPdfSelect, onFilesSelec
       } else {
         setIsLoading(true);
         onLoadingState(true);
-        const batchFiles: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' }> = [];
+        const batchFiles: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' }> = [];
 
         for (const file of acceptedFiles) {
           const isPdf = file.type === 'application/pdf';
+          const isAudio = isAudioFile(file.name);
           batchFiles.push({
             filePath: file.path || '',
             filename: file.name,
-            fileType: isPdf ? 'pdf' : 'image',
+            fileType: isPdf ? 'pdf' : isAudio ? 'audio' : 'image',
           });
         }
 
@@ -120,7 +133,7 @@ export default function ImageUploader({ onImageSelect, onPdfSelect, onFilesSelec
         }
       }
     },
-    [onImageSelect, onPdfSelect, onFilesSelected, onLoadingState, onError],
+    [onImageSelect, onPdfSelect, onAudioSelect, onFilesSelected, onLoadingState, onError],
   );
 
   const dropzoneOptions: DropzoneOptions = {
@@ -166,10 +179,10 @@ export default function ImageUploader({ onImageSelect, onPdfSelect, onFilesSelec
               <p className="dropzone__text">
                 {isDragActive
                   ? 'Drop the files here'
-                  : 'Drag & drop images or PDFs, or click to browse'}
+                  : 'Drag & drop images, PDFs, or audio, or click to browse'}
               </p>
 
-              <p className="dropzone__hint">PNG, JPG, TIFF, WEBP, PDF — multiple files supported</p>
+              <p className="dropzone__hint">PNG, JPG, TIFF, WEBP, PDF, MP3, WAV, M4A, FLAC, OGG, WEBM, AAC — multiple files supported</p>
             </>
           )}
         </div>

@@ -1,7 +1,9 @@
 export interface AppConfig {
-  provider: 'openai' | 'anthropic' | 'openai-compatible' | 'lmstudio' | 'gemini' | 'ollama' | 'mistral';
+  provider: 'openai' | 'anthropic' | 'openai-compatible' | 'lmstudio' | 'gemini' | 'ollama' | 'mistral' | 'openrouter';
   model: string;
+  audioModel?: string;
   apiKey: string;
+  apiKeys?: Record<string, string>;
   baseUrl: string;
   useApiKey: boolean;
   availableModels: string[];
@@ -12,6 +14,7 @@ const PROVIDER_DEFAULTS: Record<string, Omit<AppConfig, 'apiKey'>> = {
   openai: {
     provider: 'openai',
     model: 'gpt-4o',
+    audioModel: 'gpt-4o-audio-preview',
     baseUrl: 'https://api.openai.com',
     useApiKey: true,
     availableModels: [],
@@ -40,6 +43,7 @@ const PROVIDER_DEFAULTS: Record<string, Omit<AppConfig, 'apiKey'>> = {
   gemini: {
     provider: 'gemini',
     model: 'gemini-2.5-flash',
+    audioModel: 'gemini-2.5-flash',
     baseUrl: 'https://generativelanguage.googleapis.com',
     useApiKey: true,
     availableModels: [],
@@ -54,7 +58,15 @@ const PROVIDER_DEFAULTS: Record<string, Omit<AppConfig, 'apiKey'>> = {
   mistral: {
     provider: 'mistral',
     model: 'pixtral-large-latest',
+    audioModel: 'voxtral-mini-latest',
     baseUrl: 'https://api.mistral.ai/v1',
+    useApiKey: true,
+    availableModels: [],
+  },
+  openrouter: {
+    provider: 'openrouter',
+    model: '',
+    baseUrl: 'https://openrouter.ai/api/v1',
     useApiKey: true,
     availableModels: [],
   },
@@ -105,7 +117,9 @@ export async function loadConfig(): Promise<AppConfig | null> {
       return {
         provider: fileConfig.provider as AppConfig['provider'],
         model: fileConfig.model || defaults.model,
+        audioModel: fileConfig.audioModel || defaults.audioModel,
         apiKey: fileConfig.apiKey || envApiKey || '',
+        apiKeys: fileConfig.apiKeys || {},
         baseUrl: fileConfig.baseUrl || defaults.baseUrl || envBaseUrl || '',
         useApiKey: fileConfig.useApiKey ?? defaults.useApiKey,
         availableModels: fileConfig.availableModels || [],
