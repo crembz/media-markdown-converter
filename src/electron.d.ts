@@ -4,6 +4,7 @@ export interface BatchFileEntry {
 }
 
 interface ElectronAPI {
+  platform: NodeJS.Platform;
   loadConfig(): Promise<{ provider: string; model: string; apiKey: string; baseUrl: string; useApiKey: boolean; availableModels: string[]; outputFolder?: string } | null>;
   saveConfig(config: { provider: string; model: string; apiKey: string; baseUrl: string; useApiKey: boolean; availableModels: string[]; outputFolder?: string }): Promise<void>;
   openFileDialog(options?: Electron.OpenDialogOptions): Promise<string[] | null>;

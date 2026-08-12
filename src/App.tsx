@@ -227,9 +227,9 @@ export default function App() {
               if (currentStrategy === 'rename' && currentExisting.includes(mdName)) {
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
                 const renameMdName = `${baseName}_${timestamp}.md`;
-                window.electronAPI.writeFile(outputFolder + '/' + renameMdName, fileResult);
+                await window.electronAPI.writeFile(outputFolder + '/' + renameMdName, fileResult);
               } else {
-                window.electronAPI.writeFile(outputPath, fileResult);
+                await window.electronAPI.writeFile(outputPath, fileResult);
               }
               setFilesConverted((prev) => prev + 1);
             }
@@ -287,9 +287,9 @@ export default function App() {
                 if (currentStrategy === 'rename' && currentExisting.includes(mdName)) {
                   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
                   const renameMdName = `${baseName}_${timestamp}.md`;
-                  window.electronAPI.writeFile(outputFolder + '/' + renameMdName, fullResult);
+                  await window.electronAPI.writeFile(outputFolder + '/' + renameMdName, fullResult);
                 } else {
-                  window.electronAPI.writeFile(outputFolder + '/' + mdName, fullResult);
+                  await window.electronAPI.writeFile(outputFolder + '/' + mdName, fullResult);
                 }
                 setFilesConverted((prev) => prev + 1);
               }
@@ -325,8 +325,11 @@ export default function App() {
   }, []);
 
   const handleOpenFolder = useCallback(async () => {
-    if (outputFolder) {
+    if (!outputFolder) return;
+    try {
       await window.electronAPI.openFolder(outputFolder);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to open output folder');
     }
   }, [outputFolder]);
 
@@ -357,38 +360,45 @@ export default function App() {
   }, [outputFolder, batchFiles, currentFilename, handleConvert]);
 
   const handleConfigSaved = useCallback(async (savedConfig: AppConfig) => {
-    await saveConfig(savedConfig);
-    setConfig(savedConfig);
-    setShowConfig(false);
+    try {
+      await saveConfig(savedConfig);
+      setConfig(savedConfig);
+      setShowConfig(false);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to save configuration');
+    }
   }, []);
 
   const hasPages = pages.length > 0;
   const hasBatchFiles = batchFiles.length > 0;
   const currentImage = hasPages ? pages[currentPage] ?? pages[0]! : null;
+  const isMac = typeof window.electronAPI !== 'undefined' && window.electronAPI.platform === 'darwin';
 
   return (
     <div className="container">
-      <div className="top-bar">
+      <div className={`top-bar ${isMac ? 'top-bar--mac' : ''}`}>
         <h1>Paper → Digital Converter</h1>
         <div className="top-bar__controls">
           <button className="btn-secondary" onClick={() => setShowConfig(true)}>
             Settings
           </button>
-          <div className="window-controls">
-            <button className="window-controls__btn window-controls__btn--minimize" onClick={() => window.electronAPI.minimizeWindow()}>
-              <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5"/></svg>
-            </button>
-            <button className="window-controls__btn window-controls__btn--maximize" onClick={() => window.electronAPI.maximizeWindow()}>
-              {isMaximized ? (
-                <svg width="12" height="12" viewBox="0 0 12 12"><rect x="3" y="3" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.5"/><line x1="3" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5"/><line x1="9" y1="3" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5"/></svg>
-              ) : (
-                <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1.5"/></svg>
-              )}
-            </button>
-            <button className="window-controls__btn window-controls__btn--close" onClick={() => window.electronAPI.closeWindow()}>
-              <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.5"/></svg>
-            </button>
-          </div>
+          {!isMac && (
+            <div className="window-controls">
+              <button className="window-controls__btn window-controls__btn--minimize" onClick={() => window.electronAPI.minimizeWindow()}>
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5"/></svg>
+              </button>
+              <button className="window-controls__btn window-controls__btn--maximize" onClick={() => window.electronAPI.maximizeWindow()}>
+                {isMaximized ? (
+                  <svg width="12" height="12" viewBox="0 0 12 12"><rect x="3" y="3" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.5"/><line x1="3" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5"/><line x1="9" y1="3" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5"/></svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1.5"/></svg>
+                )}
+              </button>
+              <button className="window-controls__btn window-controls__btn--close" onClick={() => window.electronAPI.closeWindow()}>
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.5"/></svg>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -419,9 +429,13 @@ export default function App() {
                         onClick={async () => {
                           if (file) {
                             setCurrentFileIndex(index);
-                            const pages = await loadPagesFromPath(file.filePath, file.fileType);
-                            setPages(pages);
-                            setCurrentPage(0);
+                            try {
+                              const pages = await loadPagesFromPath(file.filePath, file.fileType);
+                              setPages(pages);
+                              setCurrentPage(0);
+                            } catch (err: unknown) {
+                              setError(err instanceof Error ? err.message : 'Failed to load file preview');
+                            }
                           }
                         }}
                       >

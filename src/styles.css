@@ -42,6 +42,11 @@ body {
   -webkit-app-region: drag;
 }
 
+.top-bar--mac {
+  /* leave room for the native traffic-light controls (top-left) */
+  padding-left: 80px;
+}
+
 .top-bar__controls {
   display: flex;
   align-items: center;

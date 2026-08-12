@@ -22,7 +22,7 @@ function compressCanvas(canvas: HTMLCanvasElement, quality: number): string {
 }
 
 function resizeIfNeeded(dataUri: string, maxWidth: number): Promise<string> {
-  return new Promise<string>((resolve) => {
+  return new Promise<string>((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
       if (img.width <= maxWidth && img.height <= maxWidth) {
@@ -39,6 +39,7 @@ function resizeIfNeeded(dataUri: string, maxWidth: number): Promise<string> {
       }
       resolve(compressCanvas(canvas, 0.75));
     };
+    img.onerror = () => reject(new Error('Failed to load image for resizing'));
     img.src = dataUri;
   });
 }

@@ -11,6 +11,7 @@ export interface Config {
 }
 
 export interface ElectronAPI {
+  platform: NodeJS.Platform;
   loadConfig(): Promise<Config | null>;
   saveConfig(config: Config): Promise<void>;
   openFileDialog(filters?: string[][]): Promise<string[] | null>;
@@ -29,6 +30,8 @@ export interface ElectronAPI {
 }
 
 const electronAPI: ElectronAPI = {
+  platform: process.platform,
+
   loadConfig: async (): Promise<Config | null> => {
     return ipcRenderer.invoke('load-config');
   },

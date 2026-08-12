@@ -279,7 +279,10 @@ export async function fetchAvailableModels(
           'Content-Type': 'application/json',
         },
       });
-      if (!res.ok) return [];
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Failed to fetch models from Anthropic (${res.status}): ${text.slice(0, 500)}`);
+      }
       const data = await res.json();
       return (data.models as { name: string }[] | undefined)?.map(m => m.name) || [];
     }
@@ -288,7 +291,10 @@ export async function fetchAvailableModels(
         'https://generativelanguage.googleapis.com/v1beta/models',
         { headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' } },
       );
-      if (!res.ok) return [];
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Failed to fetch models from Gemini (${res.status}): ${text.slice(0, 500)}`);
+      }
       const data = await res.json();
       return (data.models as { name: string; supportedGenerationMethods: string[] }[] | undefined)
         ?.filter(m =>
@@ -299,7 +305,10 @@ export async function fetchAvailableModels(
     }
     case 'ollama': {
       const res = await fetch(`${baseUrl}/api/tags`);
-      if (!res.ok) return [];
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Failed to fetch models from Ollama (${res.status}): ${text.slice(0, 500)}`);
+      }
       const data = await res.json();
       return (data.models as { name: string }[] | undefined)?.map(m => m.name) || [];
     }

@@ -37,6 +37,16 @@ npm run dev
 npm run build
 ```
 
+Builds an installer for the host OS. To build for a specific platform:
+
+```bash
+npm run build:linux   # AppImage + deb
+npm run build:mac     # dmg + zip
+npm run build:win     # nsis installer
+```
+
+Note: `@napi-rs/canvas` (used by the CLI's PDF rendering) and electron-builder's packaging step both require native binaries for the target OS — cross-compiling a macOS or Windows build from Linux (or vice versa) isn't supported. Build each platform on its own OS, or use the GitHub Actions workflow in [.github/workflows/build.yml](.github/workflows/build.yml), which builds all three on every push via a CI matrix.
+
 ## Configuration
 
 On first launch, configure your LLM provider in the app settings panel:
@@ -149,6 +159,12 @@ Upload multiple files at once. After selecting an output folder, choose how to h
 - **PDF Rendering**: pdfjs-dist
 - **LLM Integration**: OpenAI SDK, Anthropic SDK
 - **UI**: Custom dark theme (Catppuccin Mocha palette)
+
+## Security
+
+- **API keys** are encrypted at rest via Electron's `safeStorage` (backed by the OS keychain/credential store) before being written to the app's config file. If OS-level encryption isn't available on your system, keys fall back to plaintext storage.
+- **Renderer hardening**: `contextIsolation` and a sandboxed renderer are enabled, a Content-Security-Policy restricts script execution in production builds, and external links (e.g. inside converted markdown) always open in your default browser rather than navigating the app window.
+- The CLI's `.paper-converter.json` config file stores its API key in plaintext (no Electron `safeStorage` available outside the app) — keep it out of version control (it's `.gitignore`d by default) or supply the key via `--apiKey` instead.
 
 ## License
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } from 'electron';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 
@@ -14,17 +14,33 @@ interface Config {
   outputFolder?: string;
 }
 
+// On-disk shape: apiKey is replaced with its safeStorage-encrypted form
+// (base64) whenever OS-level encryption is available, so the key doesn't
+// sit in userData/config.json as plaintext.
+interface StoredConfig extends Omit<Config, 'apiKey'> {
+  apiKey: string;
+  apiKeyEncrypted?: boolean;
+}
+
 let mainWindow: BrowserWindow | null = null;
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin';
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    frame: false,
+    // macOS: keep the native frame but hide the title bar so the app content
+    // extends under it, using the native traffic-light controls.
+    // Windows/Linux: fully frameless, with a custom title bar drawn in the renderer.
+    frame: isMac,
+    titleBarStyle: isMac ? 'hiddenInset' : undefined,
+    trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 
@@ -36,15 +52,55 @@ function createWindow(): void {
     mainWindow?.webContents.send('window-state-changed', { maximized: false });
   });
 
+  // Converted markdown (user content, possibly containing links) is rendered
+  // in-app. Never let it navigate this window or spawn a new Electron window —
+  // send external links to the OS browser instead.
+  const devServerOrigin = 'http://localhost:5173';
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isDev && url.startsWith(devServerOrigin)) return;
+    event.preventDefault();
+    if (url.startsWith('http:') || url.startsWith('https:')) {
+      shell.openExternal(url);
+    }
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http:') || url.startsWith('https:')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL(devServerOrigin);
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(join(__dirname, '..', 'dist', 'index.html'));
   }
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Defense-in-depth: converted output is rendered as markdown/HTML in the
+  // renderer, and LLM API keys live in that same renderer's JS (required by
+  // the SDKs' dangerouslyAllowBrowser mode). A strict script-src blocks an
+  // injected <script>/inline-handler from running even if some future XSS
+  // vector appears. connect-src stays open since users can point providers
+  // at arbitrary local/remote base URLs (LM Studio, Ollama, self-hosted).
+  if (!isDev) {
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https: http: ws: wss:;",
+          ],
+        },
+      });
+    });
+  }
+
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -64,15 +120,36 @@ const configPath = join(userDataPath, 'config.json');
 ipcMain.handle('load-config', async (): Promise<Config | null> => {
   try {
     const data = await fs.readFile(configPath, 'utf-8');
-    return JSON.parse(data) as Config;
-  } catch {
-    return null;
+    const stored = JSON.parse(data) as StoredConfig;
+
+    if (stored.apiKeyEncrypted && stored.apiKey) {
+      if (!safeStorage.isEncryptionAvailable()) {
+        throw new Error('Stored API key is encrypted, but OS-level decryption is unavailable on this system.');
+      }
+      return { ...stored, apiKey: safeStorage.decryptString(Buffer.from(stored.apiKey, 'base64')) };
+    }
+
+    return stored;
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
   }
 });
 
 ipcMain.handle('save-config', async (_event, config: Config): Promise<void> => {
   try {
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    let toStore: StoredConfig = { ...config, apiKeyEncrypted: false };
+
+    if (config.apiKey && safeStorage.isEncryptionAvailable()) {
+      toStore = {
+        ...config,
+        apiKey: safeStorage.encryptString(config.apiKey).toString('base64'),
+        apiKeyEncrypted: true,
+      };
+    }
+
+    await fs.writeFile(configPath, JSON.stringify(toStore, null, 2), 'utf-8');
   } catch (error) {
     throw new Error(`Failed to save config: ${(error as Error).message}`);
   }

@@ -18,7 +18,7 @@ function compressImage(canvas: HTMLCanvasElement, quality: number): string {
 
 async function resizeIfNeeded(dataUri: string, maxWidth: number): Promise<string> {
   const img = new Image();
-  const promise = new Promise<string>((resolve) => {
+  const promise = new Promise<string>((resolve, reject) => {
     img.onload = () => {
       if (img.width <= maxWidth && img.height <= maxWidth) {
         resolve(dataUri);
@@ -34,6 +34,7 @@ async function resizeIfNeeded(dataUri: string, maxWidth: number): Promise<string
       }
       resolve(compressImage(canvas, 0.75));
     };
+    img.onerror = () => reject(new Error('Failed to load rendered page image for resizing'));
     img.src = dataUri;
   });
   return promise;

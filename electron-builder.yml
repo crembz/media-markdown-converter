@@ -1,7 +1,15 @@
-appId: paper-digital-converter
+appId: com.papertodigital.converter
+productName: Paper Digital Converter
 directories:
   output: dist
+files:
+  - dist-electron/**
+  - dist/**
+icon: build/icon.png
+
 win:
+  icon: build/icon.png
+  target: nsis
   sign: null
   signingHashAlgorithms: []
   rfc3161TimeStampServer: ""
@@ -9,3 +17,17 @@ win:
   signAndEditExecutable: false
 nsis:
   oneClick: false
+
+mac:
+  icon: build/icon.png
+  category: public.app-category.productivity
+  target:
+    - dmg
+    - zip
+
+linux:
+  icon: build/icon.png
+  category: Utility
+  target:
+    - AppImage
+    - deb
