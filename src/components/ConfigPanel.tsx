@@ -36,9 +36,15 @@ const TOP_OCR_MODELS: Partial<Record<AppConfig['provider'], string[]>> = {
 };
 
 function getOcrModelOptions(provider: AppConfig['provider'], models: string[]): string[] {
+  const curatedFallback = TOP_OCR_MODELS[provider];
+  if (!curatedFallback) {
+    // No known model catalog for this provider (local/self-hosted, e.g.
+    // LM Studio, Ollama, generic OpenAI-compatible) — there's no naming
+    // convention to filter on, so show everything the endpoint returned.
+    return models;
+  }
   const ocrNamed = models.filter((m) => m.toLowerCase().includes('ocr'));
-  if (ocrNamed.length > 0) return ocrNamed;
-  return TOP_OCR_MODELS[provider] || [];
+  return ocrNamed.length > 0 ? ocrNamed : curatedFallback;
 }
 
 // Name fragments that indicate a model can process/transcribe audio.
@@ -47,25 +53,52 @@ function getOcrModelOptions(provider: AppConfig['provider'], models: string[]): 
 // explicitly (gpt-4o-audio-preview, voxtral, whisper, gpt-4o-transcribe).
 const AUDIO_MODEL_KEYWORDS = ['audio', 'voxtral', 'whisper', 'transcribe'];
 
+// Some providers' catalogs include audio-*named* models that the keyword
+// filter above would otherwise let through but that don't actually work for
+// our use case:
+// - Mistral's /v1/audio/transcriptions endpoint returns "Invalid model" for
+//   anything except the voxtral-mini transcription variants: voxtral-small-*
+//   is chat-only, voxtral-mini-tts-* is text-to-speech (wrong direction),
+//   and voxtral-mini-*-realtime-* is a separate streaming API, not this
+//   batch REST endpoint. (Confirmed via a real "Invalid model" API error.)
+// - OpenAI/OpenRouter route audio through Chat Completions' input_audio
+//   content type (convertAudioWithOpenAI), which only gpt-4o-audio-preview
+//   and gpt-4o-mini-audio-preview support. whisper-1, gpt-4o-transcribe, and
+//   gpt-4o-mini-transcribe are dedicated /v1/audio/transcriptions-only
+//   models — passing them to Chat Completions doesn't work. (Confirmed
+//   against OpenAI's audio API docs, not live-tested — no OpenAI/OpenRouter
+//   key available in this environment.)
+const AUDIO_MODEL_EXCLUDE_KEYWORDS: Partial<Record<AppConfig['provider'], string[]>> = {
+  mistral: ['small', 'tts', 'realtime'],
+  openai: ['whisper', 'transcribe'],
+  openrouter: ['whisper', 'transcribe'],
+};
+
 // Curated fallback when a provider's fetched catalog has no models matching
 // AUDIO_MODEL_KEYWORDS — the best-known audio-capable models per provider,
 // in ranked order. Gemini has no distinctly-branded audio variant (the same
 // multimodal models take audio input), so it reuses the OCR list. Not
 // derived from any live ranking API; update by hand as models change.
 const TOP_AUDIO_MODELS: Partial<Record<AppConfig['provider'], string[]>> = {
-  openai: ['gpt-4o-audio-preview', 'gpt-4o-mini-audio-preview', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'],
+  openai: ['gpt-4o-audio-preview', 'gpt-4o-mini-audio-preview'],
   gemini: TOP_OCR_MODELS.gemini,
-  mistral: ['voxtral-mini-latest', 'voxtral-small-latest', 'voxtral-mini-2602', 'voxtral-small-2507', 'voxtral-mini-transcribe-realtime-2602'],
-  openrouter: ['openai/gpt-4o-audio-preview', 'openai/whisper-1', 'mistralai/voxtral-small-latest', 'mistralai/voxtral-mini-latest', 'google/gemini-2.5-flash'],
+  mistral: ['voxtral-mini-latest', 'voxtral-mini-2602'],
+  openrouter: ['openai/gpt-4o-audio-preview', 'mistralai/voxtral-small-latest', 'mistralai/voxtral-mini-latest', 'google/gemini-2.5-flash'],
 };
 
 function getAudioModelOptions(provider: AppConfig['provider'], models: string[]): string[] {
+  const curatedFallback = TOP_AUDIO_MODELS[provider];
+  if (!curatedFallback) {
+    return models;
+  }
+  const exclude = AUDIO_MODEL_EXCLUDE_KEYWORDS[provider] || [];
   const audioNamed = models.filter((m) => {
     const lower = m.toLowerCase();
-    return AUDIO_MODEL_KEYWORDS.some((k) => lower.includes(k));
+    const matches = AUDIO_MODEL_KEYWORDS.some((k) => lower.includes(k));
+    const excluded = exclude.some((k) => lower.includes(k));
+    return matches && !excluded;
   });
-  if (audioNamed.length > 0) return audioNamed;
-  return TOP_AUDIO_MODELS[provider] || [];
+  return audioNamed.length > 0 ? audioNamed : curatedFallback;
 }
 
 export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {
@@ -75,6 +108,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
   const [apiKey, setApiKey] = useState('');
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [baseUrl, setBaseUrl] = useState('');
+  const [baseUrls, setBaseUrls] = useState<Record<string, string>>({});
   const [useApiKey, setUseApiKey] = useState(true);
   const [showApiKey, setShowApiKey] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -109,7 +143,13 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
       }
       setApiKeys(keys);
       setApiKey(keys[config.provider] ?? config.apiKey ?? '');
-      setBaseUrl(config.baseUrl);
+      // Same backward-compat seeding for the per-provider URL map.
+      const urls = { ...(config.baseUrls || {}) };
+      if (config.baseUrl && !urls[config.provider]) {
+        urls[config.provider] = config.baseUrl;
+      }
+      setBaseUrls(urls);
+      setBaseUrl(urls[config.provider] ?? config.baseUrl ?? '');
       setUseApiKey(config.useApiKey);
     } else {
       syncDefaults('openai');
@@ -128,6 +168,12 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     // none was ever entered — API keys are per-provider, not shared state
     // that should carry over when switching.
     setApiKey(apiKeys[next] || '');
+    // Same for the base URL: if the user already customized it for this
+    // provider, keep that instead of overwriting with the provider default
+    // that syncDefaults just set.
+    if (baseUrls[next]) {
+      setBaseUrl(baseUrls[next]);
+    }
     setAvailableModels([]);
     setFetchError(null);
     setShowManualModel(false);
@@ -138,6 +184,24 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
   const supportsAudio = AUDIO_CAPABLE_PROVIDERS.includes(provider);
   const ocrModelOptions = getOcrModelOptions(provider, availableModels);
   const audioModelOptions = supportsAudio ? getAudioModelOptions(provider, availableModels) : [];
+
+  // If the saved/current value isn't in the options list (e.g. it's a value
+  // that used to be offered — like a since-excluded Mistral voxtral variant
+  // — or the filter/fallback just changed), the native <select> silently
+  // falls back to displaying its first real option without firing onChange.
+  // Keep state in sync with what's actually displayed so Save can't persist
+  // a stale value the user never consciously chose.
+  useEffect(() => {
+    if (!showManualModel && ocrModelOptions.length > 0 && !ocrModelOptions.includes(model)) {
+      setModel(ocrModelOptions[0]);
+    }
+  }, [ocrModelOptions, model, showManualModel]);
+
+  useEffect(() => {
+    if (!showManualAudioModel && audioModelOptions.length > 0 && !audioModelOptions.includes(audioModel)) {
+      setAudioModel(audioModelOptions[0]);
+    }
+  }, [audioModelOptions, audioModel, showManualAudioModel]);
 
   const handleFetchModels = async () => {
     setFetchingModels(true);
@@ -203,6 +267,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
       apiKey,
       apiKeys: { ...apiKeys, [provider]: apiKey },
       baseUrl,
+      baseUrls: { ...baseUrls, [provider]: baseUrl },
       useApiKey,
       availableModels,
       outputFolder: outputFolder || undefined,
@@ -288,7 +353,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
         <div className="form-group">
           <label htmlFor="model">Model</label>
           <div className="model-row">
-            {!showManualModel ? (
+            {ocrModelOptions.length > 0 && !showManualModel ? (
               <select
                 id="model"
                 value={ocrModelOptions.includes(model) ? model : '__custom__'}
@@ -337,7 +402,9 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
           )}
           {errors.model && <span className="error">{errors.model}</span>}
           <span className="form-hint">
-            Limited to OCR-named models{availableModels.filter((m) => m.toLowerCase().includes('ocr')).length === 0 ? ' — none found, showing well-known vision-capable models instead' : ''}. Pick "Other..." to enter any model manually.
+            {TOP_OCR_MODELS[provider]
+              ? `Limited to OCR-named models${availableModels.filter((m) => m.toLowerCase().includes('ocr')).length === 0 ? ' — none found, showing well-known vision-capable models instead' : ''}. Pick "Other..." to enter any model manually.`
+              : 'Showing all models from this endpoint. Pick "Other..." to enter any model manually.'}
           </span>
         </div>
 
@@ -346,7 +413,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
           {supportsAudio ? (
             <>
               <div className="model-row">
-                {!showManualAudioModel ? (
+                {audioModelOptions.length > 0 && !showManualAudioModel ? (
                   <select
                     id="audioModel"
                     value={audioModelOptions.includes(audioModel) ? audioModel : '__custom__'}
@@ -401,7 +468,9 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
             type="url"
             value={baseUrl}
             onChange={(e) => {
-              setBaseUrl(e.target.value);
+              const value = e.target.value;
+              setBaseUrl(value);
+              setBaseUrls(prev => ({ ...prev, [provider]: value }));
               if (errors.baseUrl) setErrors(prev => ({ ...prev, baseUrl: '' }));
             }}
             placeholder="https://api.openai.com"

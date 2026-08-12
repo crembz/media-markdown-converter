@@ -5,6 +5,7 @@ export interface AppConfig {
   apiKey: string;
   apiKeys?: Record<string, string>;
   baseUrl: string;
+  baseUrls?: Record<string, string>;
   useApiKey: boolean;
   availableModels: string[];
   outputFolder?: string;
@@ -121,6 +122,7 @@ export async function loadConfig(): Promise<AppConfig | null> {
         apiKey: fileConfig.apiKey || envApiKey || '',
         apiKeys: fileConfig.apiKeys || {},
         baseUrl: fileConfig.baseUrl || defaults.baseUrl || envBaseUrl || '',
+        baseUrls: fileConfig.baseUrls || {},
         useApiKey: fileConfig.useApiKey ?? defaults.useApiKey,
         availableModels: fileConfig.availableModels || [],
         outputFolder: fileConfig.outputFolder || '',

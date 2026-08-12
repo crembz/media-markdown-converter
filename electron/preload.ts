@@ -7,6 +7,7 @@ export interface Config {
   apiKey: string;
   apiKeys?: Record<string, string>;
   baseUrl: string;
+  baseUrls?: Record<string, string>;
   useApiKey: boolean;
   availableModels: string[];
   outputFolder?: string;
