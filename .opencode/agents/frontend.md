@@ -1,5 +1,5 @@
 ---
-description: Owns all React components, UI layout, CSS styling, state management, and user interaction patterns for the paper-to-digital converter.
+description: Owns all React components, UI layout, CSS styling, state management, and user interaction patterns for the media markdown converter.
 mode: subagent
 permission:
   edit: allow

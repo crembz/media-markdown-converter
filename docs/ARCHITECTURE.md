@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Paper → Digital Converter is an Electron desktop application that converts paper notes (photos/PDFs) into digital markdown using LLM vision models. The app uses a renderer-process architecture where the React UI runs in a Vite-dev-server-backed Chromium window, with a Node.js main process handling file system access and native dialogs.
+Media Markdown Converter is an Electron desktop application that converts paper notes (photos/PDFs) and audio recordings into digital markdown using LLM vision and audio models. The app uses a renderer-process architecture where the React UI runs in a Vite-dev-server-backed Chromium window, with a Node.js main process handling file system access and native dialogs.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -207,9 +207,9 @@ interface AppConfig {
 ### Config Storage
 
 Config is stored at `<userData>/config.json` where `userData` is:
-- **Windows**: `%APPDATA%/paper-digital-converter/config.json`
-- **macOS**: `~/Library/Application Support/paper-digital-converter/config.json`
-- **Linux**: `~/.config/paper-digital-converter/config.json`
+- **Windows**: `%APPDATA%/media-markdown-converter/config.json`
+- **macOS**: `~/Library/Application Support/media-markdown-converter/config.json`
+- **Linux**: `~/.config/media-markdown-converter/config.json`
 
 ### useApiKey Field
 

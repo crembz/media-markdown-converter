@@ -7,5 +7,5 @@ dist-cli/
 Thumbs.db
 .env
 config.json
-.paper-converter.json
+.media-markdown-converter.json
 temp.zip

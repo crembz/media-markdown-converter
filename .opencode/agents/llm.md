@@ -1,5 +1,5 @@
 ---
-description: Owns LLM client abstraction, streaming responses, OCR system prompts, and provider integration for the paper-to-digital converter.
+description: Owns LLM client abstraction, streaming responses, OCR system prompts, and provider integration for the media markdown converter.
 mode: subagent
 permission:
   edit: allow

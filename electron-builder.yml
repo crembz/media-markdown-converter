@@ -1,5 +1,5 @@
-appId: com.papertodigital.converter
-productName: Paper Digital Converter
+appId: com.mediamarkdownconverter.app
+productName: Media Markdown Converter
 directories:
   output: dist
 files:

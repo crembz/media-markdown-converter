@@ -5,7 +5,7 @@ description: Use when adding a new LLM provider to the app. Triggers on "add pro
 
 # Provider Integration Skill
 
-Use this skill when adding a new LLM provider to the Paper -> Digital Converter.
+Use this skill when adding a new LLM provider to the Media Markdown Converter.
 
 ## Overview
 

@@ -1,6 +1,6 @@
-# Paper → Digital Converter
+# Media Markdown Converter
 
-Electron + React desktop app. Converts paper notes to markdown via LLM vision models.
+Electron + React desktop app. Converts paper notes and audio recordings to markdown via LLM vision and audio models.
 
 ## Commands
 

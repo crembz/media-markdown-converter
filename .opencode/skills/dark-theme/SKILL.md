@@ -5,7 +5,7 @@ description: Use when adding or modifying CSS styles for the app. Triggers on "s
 
 # Dark Theme Skill
 
-Use this skill whenever CSS styles are added or modified for the Paper -> Digital Converter.
+Use this skill whenever CSS styles are added or modified for the Media Markdown Converter.
 
 ## Palette — Catppuccin Mocha
 

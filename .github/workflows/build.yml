@@ -52,7 +52,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: paper-digital-converter-${{ matrix.os }}
+          name: media-markdown-converter-${{ matrix.os }}
           path: |
             dist/*.dmg
             dist/*.zip

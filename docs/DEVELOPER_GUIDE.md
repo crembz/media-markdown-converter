@@ -272,8 +272,8 @@ Defined in `electron-builder.yml`:
 ### Config Not Saved
 
 - Check that `userData` directory is writable
-- On Windows: `%APPDATA%/paper-digital-converter/`
-- On macOS: `~/Library/Application Support/paper-digital-converter/`
+- On Windows: `%APPDATA%/media-markdown-converter/`
+- On macOS: `~/Library/Application Support/media-markdown-converter/`
 
 ### LM Studio Connection Refused
 
