@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Blocks commits that contain provider API keys or known secret-holding
+# files, as a backstop behind .gitignore (which already excludes .env,
+# config.json, and .media-markdown-converter.json — the three places a key
+# can land on disk). Installed via `npm install` (see package.json
+# "prepare"), which points core.hooksPath at this directory.
+set -euo pipefail
+
+blocked=0
+
+# Known secret-holding filenames — should already be gitignored, but a
+# forced `git add -f` bypasses that. Belt and suspenders.
+blocked_files=$(git diff --cached --name-only -- '.env' 'config.json' '.media-markdown-converter.json' '**/config.json' '**/.media-markdown-converter.json')
+if [ -n "$blocked_files" ]; then
+  echo "pre-commit: refusing to commit known secret-holding file(s):" >&2
+  echo "$blocked_files" | sed 's/^/  /' >&2
+  blocked=1
+fi
+
+# Key-shaped strings in the staged diff, scoped to this app's providers:
+#   OpenAI / OpenRouter: sk-... / sk-or-...
+#   Anthropic:           sk-ant-...
+#   Google / Gemini:     AIza...
+#   Generic fallback:    apiKey/api_key/API_KEY = "<15+ char token>"
+pattern='sk-(or-)?[A-Za-z0-9_-]{10,}|sk-ant-[A-Za-z0-9_-]{10,}|AIza[0-9A-Za-z_-]{10,}|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy][^=:]{0,3}[:=][[:space:]]*['\''"][A-Za-z0-9_-]{15,}'
+
+hits=$(git diff --cached -U0 -- . ':!.githooks/pre-commit' | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -E "$pattern" || true)
+if [ -n "$hits" ]; then
+  echo "pre-commit: staged diff looks like it contains an API key:" >&2
+  echo "$hits" | sed 's/^/  /' >&2
+  blocked=1
+fi
+
+if [ "$blocked" -ne 0 ]; then
+  echo "" >&2
+  echo "If this is a false positive, unstage the offending file/hunk and re-stage" >&2
+  echo "just the safe parts, or bypass with 'git commit --no-verify' if you are" >&2
+  echo "certain no real secret is included." >&2
+  exit 1
+fi
+
+exit 0
