@@ -42,7 +42,7 @@ Electron + React desktop app. Converts paper notes to markdown via LLM vision mo
 - `src/components/ImagePreview.tsx` — Single-page image preview with page navigation.
 - `electron-builder.yml` — electron-builder config: `mac`/`win`/`linux` targets, shared `icon: build/icon.png` (electron-builder auto-generates `.icns`/`.ico` from it), win signing left disabled.
 - `build/icon.png` (+ source `icon.svg`) — App icon, 1024x1024.
-- `.github/workflows/build.yml` — CI matrix building linux/mac/win on every push/PR, uploads installers as artifacts.
+- `.github/workflows/build.yml` — two jobs: `sanity` (tsc + vite build only, runs on every push/PR to main) and `package` (full electron-builder matrix across linux/mac/win, runs only on `v*` tag pushes, uploads installers as artifacts). Split this way so routine commits don't pay for three full native packaging builds — only tagged releases do.
 - `scripts/` — Build helper scripts (`7za-wrap.js`, `prepare-wincodesign.cjs`).
 
 ## Conventions
