@@ -233,7 +233,10 @@ export default function App() {
               }
               setFilesConverted((prev) => prev + 1);
             }
-          } catch {
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : 'An unknown error occurred';
+            console.error(`Failed to convert ${file.filename}:`, err);
+            setError(message);
             setFilesFailed((prev) => prev + 1);
           }
         }
@@ -293,7 +296,10 @@ export default function App() {
                 }
                 setFilesConverted((prev) => prev + 1);
               }
-            } catch {
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : 'An unknown error occurred';
+              console.error(`Failed to convert ${currentFilename}:`, err);
+              setError(message);
               setFilesFailed((prev) => prev + 1);
             }
           }

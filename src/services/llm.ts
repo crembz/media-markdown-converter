@@ -141,13 +141,22 @@ export async function convertImageToMarkdown(
     return convertWithGemini(config.apiKey, config.model, imageBase64, onChunk, signal);
   }
 
+  if (config.provider === 'mistral' && config.model.toLowerCase().includes('ocr')) {
+    if (!config.apiKey) {
+      throw new Error('Mistral API key is not configured. Please set your LLM API key in the config panel.');
+    }
+    return convertWithMistralOcr(config.apiKey, config.baseUrl || 'https://api.mistral.ai/v1', config.model, imageBase64, onChunk, signal);
+  }
+
   const openAIOpts: ConstructorParameters<typeof OpenAI>[0] = {
-    apiKey: config.apiKey || '',
+    apiKey: config.apiKey || 'not-needed',
     dangerouslyAllowBrowser: true,
   };
 
-  if ((config.provider === 'openai-compatible' || config.provider === 'lmstudio') && config.baseUrl) {
-    openAIOpts.baseURL = config.baseUrl;
+  if ((config.provider === 'openai-compatible' || config.provider === 'lmstudio' || config.provider === 'ollama' || config.provider === 'mistral') && config.baseUrl) {
+    openAIOpts.baseURL = config.provider === 'ollama' && !config.baseUrl.endsWith('/v1')
+      ? `${config.baseUrl.replace(/\/+$/, '')}/v1`
+      : config.baseUrl;
   }
 
   const client = new OpenAI(openAIOpts);
@@ -155,6 +164,43 @@ export async function convertImageToMarkdown(
   const result = await convertWithOpenAI(client, config.model, imageBase64, onChunk, signal);
   (client as unknown as Record<string, unknown>)['lastRequest'] = undefined;
   return result;
+}
+
+async function convertWithMistralOcr(
+  apiKey: string,
+  baseUrl: string,
+  model: string,
+  imageBase64: string,
+  onChunk: (text: string) => void,
+  signal: AbortSignal,
+): Promise<string> {
+  const url = `${baseUrl.replace(/\/+$/, '')}/ocr`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      document: { type: 'image_url', image_url: imageBase64 },
+    }),
+    signal,
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Mistral OCR API error (${res.status}): ${text.slice(0, 500)}`);
+  }
+
+  const data = await res.json();
+  const fullText = (data.pages as { markdown: string }[] | undefined)
+    ?.map(p => p.markdown)
+    .join('\n\n---\n\n') || '';
+
+  onChunk(fullText);
+  return fullText;
 }
 
 async function convertWithGemini(
@@ -247,7 +293,8 @@ export async function fetchAvailableModels(
   switch (provider) {
     case 'openai':
     case 'openai-compatible':
-    case 'lmstudio': {
+    case 'lmstudio':
+    case 'mistral': {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };

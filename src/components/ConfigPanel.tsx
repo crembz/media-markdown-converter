@@ -15,6 +15,7 @@ const PROVIDER_OPTIONS: AppConfig['provider'][] = [
   'lmstudio',
   'gemini',
   'ollama',
+  'mistral',
 ];
 
 export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {

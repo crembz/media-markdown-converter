@@ -1,5 +1,5 @@
 export interface AppConfig {
-  provider: 'openai' | 'anthropic' | 'openai-compatible' | 'lmstudio' | 'gemini' | 'ollama';
+  provider: 'openai' | 'anthropic' | 'openai-compatible' | 'lmstudio' | 'gemini' | 'ollama' | 'mistral';
   model: string;
   apiKey: string;
   baseUrl: string;
@@ -49,6 +49,13 @@ const PROVIDER_DEFAULTS: Record<string, Omit<AppConfig, 'apiKey'>> = {
     model: '',
     baseUrl: 'http://localhost:11434',
     useApiKey: false,
+    availableModels: [],
+  },
+  mistral: {
+    provider: 'mistral',
+    model: 'pixtral-large-latest',
+    baseUrl: 'https://api.mistral.ai/v1',
+    useApiKey: true,
     availableModels: [],
   },
 };

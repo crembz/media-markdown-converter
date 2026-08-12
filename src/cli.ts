@@ -61,6 +61,12 @@ const PROVIDER_DEFAULTS: Record<string, Omit<ConfigFile, 'apiKey' | 'availableMo
     baseUrl: 'http://localhost:11434',
     useApiKey: false,
   },
+  mistral: {
+    provider: 'mistral',
+    model: 'pixtral-large-latest',
+    baseUrl: 'https://api.mistral.ai/v1',
+    useApiKey: true,
+  },
 };
 
 async function loadConfigFile(): Promise<ConfigFile | null> {
@@ -113,7 +119,7 @@ export async function main() {
     .description('Convert paper notes (images/PDFs) to markdown using LLM vision models')
     .requiredOption('-f, --files <paths...>', 'Input image/PDF files')
     .requiredOption('-o, --output <dir>', 'Output directory for markdown files')
-    .option('-p, --provider <name>', 'LLM provider (openai, anthropic, lmstudio, gemini, ollama)')
+    .option('-p, --provider <name>', 'LLM provider (openai, anthropic, lmstudio, gemini, ollama, mistral)')
     .option('-m, --model <name>', 'Model name')
     .option('-k, --apiKey <key>', 'API key')
     .option('-b, --baseUrl <url>', 'API base URL')

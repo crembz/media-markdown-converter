@@ -1,5 +1,5 @@
 export interface AppConfig {
-  provider: 'openai' | 'anthropic' | 'openai-compatible' | 'lmstudio' | 'gemini' | 'ollama';
+  provider: 'openai' | 'anthropic' | 'openai-compatible' | 'lmstudio' | 'gemini' | 'ollama' | 'mistral';
   model: string;
   apiKey: string;
   baseUrl: string;
