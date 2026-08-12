@@ -10,11 +10,6 @@ icon: build/icon.png
 win:
   icon: build/icon.png
   target: nsis
-  sign: null
-  signingHashAlgorithms: []
-  rfc3161TimeStampServer: ""
-  certificateSubjectName: null
-  signAndEditExecutable: false
 nsis:
   oneClick: false
 
