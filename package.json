@@ -1,6 +1,6 @@
 {
   "name": "paper-digital-converter",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Convert paper notes to digital markdown using LLM vision",
   "author": {
     "name": "Crembz",
