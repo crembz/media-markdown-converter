@@ -14,6 +14,9 @@ interface Config {
   baseUrls?: Record<string, string>;
   useApiKey: boolean;
   availableModels: string[];
+  audioModels?: string[];
+  modelsByProvider?: Record<string, string>;
+  audioModelsByProvider?: Record<string, string>;
   outputFolder?: string;
 }
 
@@ -338,4 +341,74 @@ ipcMain.handle('file-exists', async (_event, filePath: string): Promise<boolean>
   } catch {
     return false;
   }
+});
+
+// Splits a long audio recording into sequential MP3 chunks via ffmpeg,
+// run here in the main process rather than decoding in the renderer.
+// OpenRouter's dedicated transcription endpoint died on long single
+// requests even when the upstream provider completed successfully server
+// side (confirmed live: a long single-file request failed client-side with
+// a bare network error, yet OpenRouter's own request log showed it routed
+// and returned OK) — so this isn't purely the documented 60s processing
+// timeout, but some other client/connection-duration limit on long-lived
+// requests. Splitting into small, fast-uploading chunks sidesteps it either
+// way. MP3 instead of WAV keeps each chunk's upload small (a 5-minute WAV
+// chunk is ~50MB; the equivalent MP3 is a fraction of that), which reduces
+// how long any single request's connection stays open. ffmpeg also
+// processes audio as a stream rather than loading the whole file into
+// memory (unlike the Web Audio API's decodeAudioData, used by an earlier,
+// since-removed version of this splitting logic, which held the *entire*
+// recording as raw Float32 PCM at once — a GB+ allocation for anything past
+// ~20-30 minutes that was crashing the renderer outright).
+ipcMain.handle('split-audio', async (_event, audioBase64: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }> => {
+  const os = await import('os');
+  const { spawn } = await import('child_process');
+  const ffmpegPath = (await import('ffmpeg-static')).default;
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg binary not available (ffmpeg-static failed to resolve a path for this platform)');
+  }
+
+  const tempDir = await fs.mkdtemp(join(os.tmpdir(), 'mmc-audio-'));
+
+  try {
+    const inputPath = join(tempDir, 'input');
+    await fs.writeFile(inputPath, Buffer.from(audioBase64, 'base64'));
+
+    const outputPattern = join(tempDir, 'chunk_%04d.mp3');
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(ffmpegPath, [
+        '-i', inputPath,
+        '-f', 'segment',
+        '-segment_time', String(chunkSeconds),
+        '-c:a', 'libmp3lame',
+        '-b:a', '128k',
+        '-reset_timestamps', '1',
+        '-y',
+        outputPattern,
+      ]);
+      let stderr = '';
+      proc.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+      proc.on('error', reject);
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-1000)}`));
+      });
+    });
+
+    await fs.unlink(inputPath).catch(() => {});
+
+    const entries = await fs.readdir(tempDir);
+    const files = entries.filter((f) => f.endsWith('.mp3')).sort().map((f) => join(tempDir, f));
+    if (files.length === 0) {
+      throw new Error('ffmpeg produced no output audio segments');
+    }
+    return { dir: tempDir, files };
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+});
+
+ipcMain.handle('cleanup-temp-dir', async (_event, dirPath: string): Promise<void> => {
+  await fs.rm(dirPath, { recursive: true, force: true }).catch(() => {});
 });

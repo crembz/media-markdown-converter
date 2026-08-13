@@ -5,8 +5,8 @@ export interface BatchFileEntry {
 
 interface ElectronAPI {
   platform: NodeJS.Platform;
-  loadConfig(): Promise<{ provider: string; model: string; audioModel?: string; apiKey: string; apiKeys?: Record<string, string>; baseUrl: string; baseUrls?: Record<string, string>; useApiKey: boolean; availableModels: string[]; outputFolder?: string } | null>;
-  saveConfig(config: { provider: string; model: string; audioModel?: string; apiKey: string; apiKeys?: Record<string, string>; baseUrl: string; baseUrls?: Record<string, string>; useApiKey: boolean; availableModels: string[]; outputFolder?: string }): Promise<void>;
+  loadConfig(): Promise<{ provider: string; model: string; audioModel?: string; apiKey: string; apiKeys?: Record<string, string>; baseUrl: string; baseUrls?: Record<string, string>; useApiKey: boolean; availableModels: string[]; audioModels?: string[]; modelsByProvider?: Record<string, string>; audioModelsByProvider?: Record<string, string>; outputFolder?: string } | null>;
+  saveConfig(config: { provider: string; model: string; audioModel?: string; apiKey: string; apiKeys?: Record<string, string>; baseUrl: string; baseUrls?: Record<string, string>; useApiKey: boolean; availableModels: string[]; audioModels?: string[]; modelsByProvider?: Record<string, string>; audioModelsByProvider?: Record<string, string>; outputFolder?: string }): Promise<void>;
   openFileDialog(options?: Electron.OpenDialogOptions): Promise<string[] | null>;
   saveFileDialog(defaultPath?: string): Promise<string | null>;
   readFile(path: string, asBase64?: boolean): Promise<string>;
@@ -20,6 +20,8 @@ interface ElectronAPI {
   openFolder(path: string): Promise<void>;
   openDirectoryDialog(): Promise<string | null>;
   fileExists(path: string): Promise<boolean>;
+  splitAudio(audioBase64: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }>;
+  cleanupTempDir(dirPath: string): Promise<void>;
 }
 
 declare global {

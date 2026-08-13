@@ -16,6 +16,7 @@
     "src/pdf-node.ts",
     "src/services/llm.ts",
     "src/utils/prompt.ts",
-    "src/utils/fileKind.ts"
+    "src/utils/fileKind.ts",
+    "src/electron.d.ts"
   ]
 }

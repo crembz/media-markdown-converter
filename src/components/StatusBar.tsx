@@ -1,4 +1,5 @@
 import React from 'react';
+import { UsageInfo } from '../services/llm';
 
 interface StatusBarProps {
   isProcessing: boolean;
@@ -8,6 +9,7 @@ interface StatusBarProps {
   hasImage: boolean;
   hasConfig: boolean;
   convertingPage: { current: number; total: number } | null;
+  isAudio: boolean;
   batchStatus: 'idle' | 'processing' | 'done' | 'error';
   totalFiles: number;
   filesConverted: number;
@@ -15,8 +17,18 @@ interface StatusBarProps {
   filesFailed: number;
   outputFolder: string | null;
   showConflictDialog: boolean;
+  activeModel: string | null;
+  usageInfo: UsageInfo | null;
   onConvertWithFolder: () => void;
   onOpenFolder: () => void;
+}
+
+function formatUsage(usage: UsageInfo): string | null {
+  const parts: string[] = [];
+  const total = usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+  if (total > 0) parts.push(`${total.toLocaleString()} tokens`);
+  if (usage.cost !== undefined) parts.push(`$${usage.cost.toFixed(4)}`);
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 function Spinner(): React.ReactElement {
@@ -53,6 +65,7 @@ export default function StatusBar({
   hasImage,
   hasConfig,
   convertingPage,
+  isAudio,
   batchStatus,
   totalFiles,
   filesConverted,
@@ -60,6 +73,8 @@ export default function StatusBar({
   filesFailed,
   outputFolder,
   showConflictDialog,
+  activeModel,
+  usageInfo,
   onConvertWithFolder,
   onOpenFolder,
 }: StatusBarProps): React.ReactElement {
@@ -71,7 +86,9 @@ export default function StatusBar({
     statusClass = 'status-error';
   } else if (isProcessing && convertingPage) {
     statusContent = convertingPage.total > 1
-      ? `Converting page ${convertingPage.current} of ${convertingPage.total}...`
+      ? isAudio
+        ? `Transcribing chunk ${convertingPage.current} of ${convertingPage.total}...`
+        : `Converting page ${convertingPage.current} of ${convertingPage.total}...`
       : 'Converting...';
     statusClass = 'status-processing';
   } else if (isProcessing) {
@@ -123,12 +140,21 @@ export default function StatusBar({
     statusClass = '';
   }
 
+  const usageText = usageInfo ? formatUsage(usageInfo) : null;
+
   return (
     <div className="status-bar">
       <span className={`status-text ${statusClass}`}>
         {isProcessing && <Spinner />}
         {statusContent}
       </span>
+
+      {activeModel && (
+        <span className="status-bar__model" title={usageText ? 'Model in use, and token usage for the last conversion' : 'Model in use'}>
+          {activeModel}
+          {usageText && <span className="status-bar__usage"> · {usageText}</span>}
+        </span>
+      )}
 
       <div className="status-bar__actions">
         {!isProcessing && batchStatus !== 'processing' && (

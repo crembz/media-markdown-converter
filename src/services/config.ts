@@ -8,6 +8,9 @@ export interface AppConfig {
   baseUrls?: Record<string, string>;
   useApiKey: boolean;
   availableModels: string[];
+  audioModels?: string[];
+  modelsByProvider?: Record<string, string>;
+  audioModelsByProvider?: Record<string, string>;
   outputFolder?: string;
 }
 
@@ -125,6 +128,9 @@ export async function loadConfig(): Promise<AppConfig | null> {
         baseUrls: fileConfig.baseUrls || {},
         useApiKey: fileConfig.useApiKey ?? defaults.useApiKey,
         availableModels: fileConfig.availableModels || [],
+        audioModels: fileConfig.audioModels || [],
+        modelsByProvider: fileConfig.modelsByProvider || {},
+        audioModelsByProvider: fileConfig.audioModelsByProvider || {},
         outputFolder: fileConfig.outputFolder || '',
       };
     }

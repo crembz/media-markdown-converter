@@ -119,6 +119,25 @@ body {
   color: #a6e3a1;
 }
 
+.status-bar__model {
+  flex-shrink: 0;
+  margin: 0 1rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  background-color: #1e1e2e;
+  border: 1px solid #2a2a4a;
+  color: #a6adc8;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+.status-bar__usage {
+  color: #6c7086;
+}
+
 .status-bar__actions {
   display: flex;
   align-items: center;

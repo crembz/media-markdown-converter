@@ -8,5 +8,8 @@ export interface AppConfig {
   baseUrls?: Record<string, string>;
   useApiKey: boolean;
   availableModels: string[];
+  audioModels?: string[];
+  modelsByProvider?: Record<string, string>;
+  audioModelsByProvider?: Record<string, string>;
   outputFolder?: string;
 }

@@ -5,6 +5,7 @@ interface LiveOutputPanelProps {
   currentFileIndex: number;
   totalFiles: number;
   convertingPage: { current: number; total: number } | null;
+  isAudio: boolean;
   output: string;
 }
 
@@ -13,6 +14,7 @@ export default function LiveOutputPanel({
   currentFileIndex,
   totalFiles,
   convertingPage,
+  isAudio,
   output,
 }: LiveOutputPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -44,9 +46,9 @@ export default function LiveOutputPanel({
             {isSingleImage ? 'Converting' : `File ${currentFileIndex + 1}/${totalFiles}`}
           </span>
           <span className="live-output-panel__filename">{currentFile}</span>
-          {convertingPage && (
+          {convertingPage && convertingPage.total > 1 && (
             <span className="live-output-panel__page">
-              Page {convertingPage.current}/{convertingPage.total}
+              {isAudio ? 'Chunk' : 'Page'} {convertingPage.current}/{convertingPage.total}
             </span>
           )}
         </div>

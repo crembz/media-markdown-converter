@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AppConfig, getDefaultConfig } from '../services/config';
-import { fetchAvailableModels } from '../services/llm';
+import { fetchAvailableModels, fetchAudioCapableModels, fetchVisionCapableModels } from '../services/llm';
 
 type ConfigPanelProps = {
   config: AppConfig | null;
@@ -23,88 +23,12 @@ function sortModels(models: string[]): string[] {
   return [...models].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
 }
 
-// Curated fallback when a provider's fetched catalog has no models with
-// "ocr" in the name (true for everyone except Mistral) — the best-known
-// vision-capable models per provider, in ranked order (not alphabetical).
-// Not derived from any live ranking API; update by hand as models change.
-const TOP_OCR_MODELS: Partial<Record<AppConfig['provider'], string[]>> = {
-  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini'],
-  anthropic: ['claude-opus-4-20250514', 'claude-sonnet-4-20250514', 'claude-3-7-sonnet-latest', 'claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
-  gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
-  mistral: ['mistral-ocr-latest', 'pixtral-large-latest', 'pixtral-12b-latest', 'mistral-medium-latest', 'mistral-small-latest'],
-  openrouter: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-2.5-flash', 'mistralai/pixtral-large-latest', 'qwen/qwen2.5-vl-72b-instruct'],
-};
-
-function getOcrModelOptions(provider: AppConfig['provider'], models: string[]): string[] {
-  const curatedFallback = TOP_OCR_MODELS[provider];
-  if (!curatedFallback) {
-    // No known model catalog for this provider (local/self-hosted, e.g.
-    // LM Studio, Ollama, generic OpenAI-compatible) — there's no naming
-    // convention to filter on, so show everything the endpoint returned.
-    return models;
-  }
-  const ocrNamed = models.filter((m) => m.toLowerCase().includes('ocr'));
-  return ocrNamed.length > 0 ? ocrNamed : curatedFallback;
-}
-
-// Name fragments that indicate a model can process/transcribe audio.
-// "ocr" providers name their vision model plainly (gpt-4o, gemini-2.5-flash)
-// so there's no single keyword to reuse — audio-capable variants call it out
-// explicitly (gpt-4o-audio-preview, voxtral, whisper, gpt-4o-transcribe).
-const AUDIO_MODEL_KEYWORDS = ['audio', 'voxtral', 'whisper', 'transcribe'];
-
-// Some providers' catalogs include audio-*named* models that the keyword
-// filter above would otherwise let through but that don't actually work for
-// our use case:
-// - Mistral's /v1/audio/transcriptions endpoint returns "Invalid model" for
-//   anything except the voxtral-mini transcription variants: voxtral-small-*
-//   is chat-only, voxtral-mini-tts-* is text-to-speech (wrong direction),
-//   and voxtral-mini-*-realtime-* is a separate streaming API, not this
-//   batch REST endpoint. (Confirmed via a real "Invalid model" API error.)
-// - OpenAI/OpenRouter route audio through Chat Completions' input_audio
-//   content type (convertAudioWithOpenAI), which only gpt-4o-audio-preview
-//   and gpt-4o-mini-audio-preview support. whisper-1, gpt-4o-transcribe, and
-//   gpt-4o-mini-transcribe are dedicated /v1/audio/transcriptions-only
-//   models — passing them to Chat Completions doesn't work. (Confirmed
-//   against OpenAI's audio API docs, not live-tested — no OpenAI/OpenRouter
-//   key available in this environment.)
-const AUDIO_MODEL_EXCLUDE_KEYWORDS: Partial<Record<AppConfig['provider'], string[]>> = {
-  mistral: ['small', 'tts', 'realtime'],
-  openai: ['whisper', 'transcribe'],
-  openrouter: ['whisper', 'transcribe'],
-};
-
-// Curated fallback when a provider's fetched catalog has no models matching
-// AUDIO_MODEL_KEYWORDS — the best-known audio-capable models per provider,
-// in ranked order. Gemini has no distinctly-branded audio variant (the same
-// multimodal models take audio input), so it reuses the OCR list. Not
-// derived from any live ranking API; update by hand as models change.
-const TOP_AUDIO_MODELS: Partial<Record<AppConfig['provider'], string[]>> = {
-  openai: ['gpt-4o-audio-preview', 'gpt-4o-mini-audio-preview'],
-  gemini: TOP_OCR_MODELS.gemini,
-  mistral: ['voxtral-mini-latest', 'voxtral-mini-2602'],
-  openrouter: ['openai/gpt-4o-audio-preview', 'mistralai/voxtral-small-latest', 'mistralai/voxtral-mini-latest', 'google/gemini-2.5-flash'],
-};
-
-function getAudioModelOptions(provider: AppConfig['provider'], models: string[]): string[] {
-  const curatedFallback = TOP_AUDIO_MODELS[provider];
-  if (!curatedFallback) {
-    return models;
-  }
-  const exclude = AUDIO_MODEL_EXCLUDE_KEYWORDS[provider] || [];
-  const audioNamed = models.filter((m) => {
-    const lower = m.toLowerCase();
-    const matches = AUDIO_MODEL_KEYWORDS.some((k) => lower.includes(k));
-    const excluded = exclude.some((k) => lower.includes(k));
-    return matches && !excluded;
-  });
-  return audioNamed.length > 0 ? audioNamed : curatedFallback;
-}
-
 export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProps) {
   const [provider, setProvider] = useState<AppConfig['provider']>('openai');
   const [model, setModel] = useState('');
+  const [modelsByProvider, setModelsByProvider] = useState<Record<string, string>>({});
   const [audioModel, setAudioModel] = useState('');
+  const [audioModelsByProvider, setAudioModelsByProvider] = useState<Record<string, string>>({});
   const [apiKey, setApiKey] = useState('');
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [baseUrl, setBaseUrl] = useState('');
@@ -113,6 +37,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
   const [showApiKey, setShowApiKey] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [audioModels, setAudioModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [showManualModel, setShowManualModel] = useState(false);
@@ -132,8 +57,24 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
   useEffect(() => {
     if (config) {
       setProvider(config.provider);
-      setModel(config.model);
-      setAudioModel(config.audioModel || getDefaultConfig(config.provider).audioModel || '');
+      // Backward compat: configs saved before per-provider model maps
+      // existed only have the legacy flat model/audioModel fields — seed
+      // the maps with them under the current provider so switching away
+      // and back still recalls them, same pattern as apiKeys/baseUrls below.
+      const models = { ...(config.modelsByProvider || {}) };
+      if (config.model && !models[config.provider]) {
+        models[config.provider] = config.model;
+      }
+      setModelsByProvider(models);
+      setModel(models[config.provider] ?? config.model);
+
+      const legacyAudioModel = config.audioModel || getDefaultConfig(config.provider).audioModel;
+      const audioModelsMap = { ...(config.audioModelsByProvider || {}) };
+      if (legacyAudioModel && !audioModelsMap[config.provider]) {
+        audioModelsMap[config.provider] = legacyAudioModel;
+      }
+      setAudioModelsByProvider(audioModelsMap);
+      setAudioModel(audioModelsMap[config.provider] ?? legacyAudioModel ?? '');
       // Backward compat: configs saved before per-provider keys existed only
       // have the legacy flat apiKey field — seed the map with it under the
       // current provider so switching away and back still recalls it.
@@ -156,6 +97,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     }
     setErrors({});
     setAvailableModels(sortModels(config?.availableModels || []));
+    setAudioModels(sortModels(config?.audioModels || []));
     setFetchError(null);
     setOutputFolder(config?.outputFolder || '');
   }, [config, syncDefaults]);
@@ -164,6 +106,11 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     const next = e.target.value as AppConfig['provider'];
     setProvider(next);
     syncDefaults(next);
+    // Recall this provider's previously-selected model, or suggest the
+    // provider's default if it's never been configured before — same
+    // recall-then-fall-back-to-default technique as baseUrl below.
+    setModel(modelsByProvider[next] || getDefaultConfig(next).model);
+    setAudioModel(audioModelsByProvider[next] || getDefaultConfig(next).audioModel || '');
     // Recall this provider's previously-saved key, or blank the field if
     // none was ever entered — API keys are per-provider, not shared state
     // that should carry over when switching.
@@ -175,6 +122,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
       setBaseUrl(baseUrls[next]);
     }
     setAvailableModels([]);
+    setAudioModels([]);
     setFetchError(null);
     setShowManualModel(false);
     setShowManualAudioModel(false);
@@ -182,33 +130,19 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
   };
 
   const supportsAudio = AUDIO_CAPABLE_PROVIDERS.includes(provider);
-  const ocrModelOptions = getOcrModelOptions(provider, availableModels);
-  const audioModelOptions = supportsAudio ? getAudioModelOptions(provider, availableModels) : [];
-
-  // If the saved/current value isn't in the options list (e.g. it's a value
-  // that used to be offered — like a since-excluded Mistral voxtral variant
-  // — or the filter/fallback just changed), the native <select> silently
-  // falls back to displaying its first real option without firing onChange.
-  // Keep state in sync with what's actually displayed so Save can't persist
-  // a stale value the user never consciously chose.
-  useEffect(() => {
-    if (!showManualModel && ocrModelOptions.length > 0 && !ocrModelOptions.includes(model)) {
-      setModel(ocrModelOptions[0]);
-    }
-  }, [ocrModelOptions, model, showManualModel]);
-
-  useEffect(() => {
-    if (!showManualAudioModel && audioModelOptions.length > 0 && !audioModelOptions.includes(audioModel)) {
-      setAudioModel(audioModelOptions[0]);
-    }
-  }, [audioModelOptions, audioModel, showManualAudioModel]);
 
   const handleFetchModels = async () => {
     setFetchingModels(true);
     setFetchError(null);
     try {
-      const models = await fetchAvailableModels(provider, apiKey, baseUrl);
+      const [models, audioCapableModels] = await Promise.all([
+        provider === 'openrouter'
+          ? fetchVisionCapableModels(provider, apiKey, baseUrl)
+          : fetchAvailableModels(provider, apiKey, baseUrl),
+        supportsAudio ? fetchAudioCapableModels(provider, apiKey, baseUrl) : Promise.resolve([]),
+      ]);
       setAvailableModels(sortModels(models));
+      setAudioModels(sortModels(audioCapableModels));
       setFetchingModels(false);
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : 'Failed to fetch models');
@@ -221,13 +155,17 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
       setShowManualModel(true);
     } else {
       setShowManualModel(false);
-      setModel(e.target.value);
+      const value = e.target.value;
+      setModel(value);
+      setModelsByProvider(prev => ({ ...prev, [provider]: value }));
       if (errors.model) setErrors(prev => ({ ...prev, model: '' }));
     }
   };
 
   const handleManualModelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setModel(e.target.value);
+    const value = e.target.value;
+    setModel(value);
+    setModelsByProvider(prev => ({ ...prev, [provider]: value }));
     if (errors.model) setErrors(prev => ({ ...prev, model: '' }));
   };
 
@@ -236,12 +174,16 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
       setShowManualAudioModel(true);
     } else {
       setShowManualAudioModel(false);
-      setAudioModel(e.target.value);
+      const value = e.target.value;
+      setAudioModel(value);
+      setAudioModelsByProvider(prev => ({ ...prev, [provider]: value }));
     }
   };
 
   const handleManualAudioModelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setAudioModel(e.target.value);
+    const value = e.target.value;
+    setAudioModel(value);
+    setAudioModelsByProvider(prev => ({ ...prev, [provider]: value }));
   };
 
   const validate = (): boolean => {
@@ -270,6 +212,9 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
       baseUrls: { ...baseUrls, [provider]: baseUrl },
       useApiKey,
       availableModels,
+      audioModels: supportsAudio ? audioModels : [],
+      modelsByProvider: { ...modelsByProvider, [provider]: model },
+      audioModelsByProvider: { ...audioModelsByProvider, [provider]: audioModel },
       outputFolder: outputFolder || undefined,
     });
   };
@@ -353,19 +298,19 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
         <div className="form-group">
           <label htmlFor="model">Model</label>
           <div className="model-row">
-            {ocrModelOptions.length > 0 && !showManualModel ? (
+            {availableModels.length > 0 && !showManualModel ? (
               <select
                 id="model"
-                value={ocrModelOptions.includes(model) ? model : '__custom__'}
+                value={availableModels.includes(model) ? model : '__custom__'}
                 onChange={handleModelSelect}
                 aria-invalid={!!errors.model}
               >
-                {ocrModelOptions.length > 0 && (
+                {availableModels.length > 0 && (
                   <option value="" disabled>
                     Select a model
                   </option>
                 )}
-                {ocrModelOptions.map((m) => (
+                {availableModels.map((m) => (
                   <option key={m} value={m}>
                     {m}
                   </option>
@@ -402,8 +347,8 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
           )}
           {errors.model && <span className="error">{errors.model}</span>}
           <span className="form-hint">
-            {TOP_OCR_MODELS[provider]
-              ? `Limited to OCR-named models${availableModels.filter((m) => m.toLowerCase().includes('ocr')).length === 0 ? ' — none found, showing well-known vision-capable models instead' : ''}. Pick "Other..." to enter any model manually.`
+            {provider === 'openrouter'
+              ? 'Showing vision-capable models from OpenRouter\'s catalog. Pick "Other..." to enter any model manually.'
               : 'Showing all models from this endpoint. Pick "Other..." to enter any model manually.'}
           </span>
         </div>
@@ -413,18 +358,18 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
           {supportsAudio ? (
             <>
               <div className="model-row">
-                {audioModelOptions.length > 0 && !showManualAudioModel ? (
+                {audioModels.length > 0 && !showManualAudioModel ? (
                   <select
                     id="audioModel"
-                    value={audioModelOptions.includes(audioModel) ? audioModel : '__custom__'}
+                    value={audioModels.includes(audioModel) ? audioModel : '__custom__'}
                     onChange={handleAudioModelSelect}
                   >
-                    {audioModelOptions.length > 0 && (
+                    {audioModels.length > 0 && (
                       <option value="" disabled>
                         Select a model
                       </option>
                     )}
-                    {audioModelOptions.map((m) => (
+                    {audioModels.map((m) => (
                       <option key={m} value={m}>
                         {m}
                       </option>
@@ -442,7 +387,7 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
                 )}
               </div>
               <span className="form-hint">
-                Limited to audio/transcription-capable models{availableModels.filter((m) => AUDIO_MODEL_KEYWORDS.some((k) => m.toLowerCase().includes(k))).length === 0 ? ' — none found, showing well-known audio-capable models instead' : ''}. Pick "Other..." to enter any model manually.
+                Showing audio-capable models from this endpoint. Pick "Other..." to enter any model manually.
               </span>
             </>
           ) : (

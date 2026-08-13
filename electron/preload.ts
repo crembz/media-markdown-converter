@@ -10,6 +10,9 @@ export interface Config {
   baseUrls?: Record<string, string>;
   useApiKey: boolean;
   availableModels: string[];
+  audioModels?: string[];
+  modelsByProvider?: Record<string, string>;
+  audioModelsByProvider?: Record<string, string>;
   outputFolder?: string;
 }
 
@@ -30,6 +33,8 @@ export interface ElectronAPI {
   openFolder(path: string): Promise<void>;
   openDirectoryDialog(): Promise<string | null>;
   fileExists(path: string): Promise<boolean>;
+  splitAudio(audioBase64: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }>;
+  cleanupTempDir(dirPath: string): Promise<void>;
 }
 
 const electronAPI: ElectronAPI = {
@@ -99,6 +104,14 @@ const electronAPI: ElectronAPI = {
 
   fileExists: async (path: string): Promise<boolean> => {
     return ipcRenderer.invoke('file-exists', path);
+  },
+
+  splitAudio: async (audioBase64: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }> => {
+    return ipcRenderer.invoke('split-audio', audioBase64, chunkSeconds);
+  },
+
+  cleanupTempDir: async (dirPath: string): Promise<void> => {
+    return ipcRenderer.invoke('cleanup-temp-dir', dirPath);
   },
 };
 

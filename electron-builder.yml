@@ -5,6 +5,12 @@ directories:
 files:
   - dist-electron/**
   - dist/**
+  - node_modules/ffmpeg-static/**
+# The ffmpeg binary can't run from inside app.asar — unpack it so it stays a
+# real file on disk at node_modules/ffmpeg-static/ffmpeg (ffmpeg-static's own
+# path resolution already expects this asar/asar.unpacked split).
+asarUnpack:
+  - node_modules/ffmpeg-static/**
 icon: build/icon.png
 
 win:

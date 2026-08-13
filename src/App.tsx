@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppConfig, loadConfig, saveConfig } from './services/config';
-import { convertImageToMarkdown, convertAudioToMarkdown } from './services/llm';
+import { convertImageToMarkdown, convertAudioToMarkdown, mergeUsage, UsageInfo } from './services/llm';
 import { renderPdfPages } from './utils/pdf';
 import { getFileKind, getAudioMimeType } from './utils/fileKind';
 import ImageUploader from './components/ImageUploader';
@@ -31,6 +31,7 @@ export default function App() {
   const [existingFiles, setExistingFiles] = useState<string[]>([]);
   const [showConflictDialog, setShowConflictDialog] = useState(false);
   const [liveOutput, setLiveOutput] = useState('');
+  const [usageInfo, setUsageInfo] = useState<UsageInfo | null>(null);
   const currentPartialRef = useRef('');
   const conflictStrategyRef = useRef(conflictStrategy);
   const existingFilesRef = useRef(existingFiles);
@@ -44,6 +45,22 @@ export default function App() {
         return prev + separator + currentPartialRef.current;
       });
     };
+  }, []);
+
+  // Accumulates usage across every request the current file's conversion
+  // makes (e.g. one per page for a multi-page PDF) so the total shown
+  // reflects the whole file, not just the last page.
+  const handleUsage = useCallback((usage: UsageInfo) => {
+    setUsageInfo(prev => mergeUsage(prev ?? undefined, usage) ?? null);
+  }, []);
+
+  // Audio files aren't paginated (convertingPage is otherwise always {1, 1}
+  // for them), but a long recording sent through OpenRouter does get split
+  // into several sequential chunks — reusing convertingPage's {current,
+  // total} shape for that lets the same progress UI show real progress
+  // ("chunk 2 of 5") instead of a meaningless "page 1 of 1".
+  const handleAudioProgress = useCallback((current: number, total: number) => {
+    setConvertingPage({ current, total });
   }, []);
 
   useEffect(() => {
@@ -180,6 +197,9 @@ export default function App() {
     abortControllerRef.current = abortController;
     const currentStrategy = conflictStrategyRef.current;
     const currentExisting = existingFilesRef.current;
+    // Tracked locally rather than read back from filesFailed state, since
+    // state updates aren't visible synchronously within this same closure.
+    let hadFailure = false;
 
     setIsProcessing(true);
     setError(null);
@@ -211,6 +231,7 @@ export default function App() {
           try {
             const pages = await loadPagesFromPath(file.filePath, file.fileType);
             setConvertingPage({ current: 1, total: pages.length });
+            setUsageInfo(null);
 
             let fileResult = '';
 
@@ -224,6 +245,8 @@ export default function App() {
                 getAudioMimeType(file.filename),
                 streamCallback,
                 abortController.signal,
+                handleUsage,
+                handleAudioProgress,
               );
 
               currentPartialRef.current = '';
@@ -242,6 +265,7 @@ export default function App() {
                   pages[p],
                   pageStreamCallback,
                   abortController.signal,
+                  handleUsage,
                 );
 
                 fileResult += pageResult;
@@ -270,11 +294,16 @@ export default function App() {
             console.error(`Failed to convert ${file.filename}:`, err);
             setError(message);
             setFilesFailed((prev) => prev + 1);
+            hadFailure = true;
           }
         }
 
         if (!abortController.signal.aborted) {
-          setBatchStatus('done');
+          // A failure shouldn't leave the Convert button permanently
+          // disabled (batchStatus === 'done' disables it) — falling back to
+          // 'error' here lets the user retry immediately instead of having
+          // to reload/replace the file(s) just to reset the status.
+          setBatchStatus(hadFailure ? 'error' : 'done');
           setConflictStrategy(null);
           setExistingFiles([]);
         } else {
@@ -290,6 +319,7 @@ export default function App() {
           } else {
             try {
               setConvertingPage({ current: 1, total: pages.length });
+              setUsageInfo(null);
 
               let fullResult = '';
               const kind = getFileKind(currentFilename);
@@ -304,6 +334,8 @@ export default function App() {
                   getAudioMimeType(currentFilename),
                   streamCallback,
                   abortController.signal,
+                  handleUsage,
+                  handleAudioProgress,
                 );
 
                 currentPartialRef.current = '';
@@ -322,6 +354,7 @@ export default function App() {
                     pages[i],
                     pageStreamCallback,
                     abortController.signal,
+                    handleUsage,
                   );
 
                   fullResult += pageResult;
@@ -350,12 +383,15 @@ export default function App() {
               console.error(`Failed to convert ${currentFilename}:`, err);
               setError(message);
               setFilesFailed((prev) => prev + 1);
+              hadFailure = true;
             }
           }
         }
 
         if (!abortController.signal.aborted) {
-          setBatchStatus('done');
+          // Same reasoning as the batch branch above: don't let a failed
+          // conversion leave the Convert button disabled.
+          setBatchStatus(hadFailure ? 'error' : 'done');
           setConflictStrategy(null);
           setExistingFiles([]);
         } else {
@@ -428,6 +464,16 @@ export default function App() {
   const hasBatchFiles = batchFiles.length > 0;
   const currentImage = hasPages ? pages[currentPage] ?? pages[0]! : null;
   const isMac = typeof window.electronAPI !== 'undefined' && window.electronAPI.platform === 'darwin';
+
+  // Which model is/will be used for whatever's currently loaded — audio
+  // files use the separate audioModel (falling back to model, matching
+  // convertAudioToMarkdown's own fallback), everything else uses model.
+  const currentFileKind = hasBatchFiles
+    ? batchFiles[currentFileIndex]?.fileType ?? null
+    : currentFilename ? getFileKind(currentFilename) : null;
+  const activeModel = config
+    ? (currentFileKind === 'audio' ? (config.audioModel || config.model) : config.model)
+    : null;
 
   return (
     <div className="container">
@@ -533,6 +579,7 @@ export default function App() {
               currentFileIndex={currentFileIndex}
               totalFiles={batchFiles.filter(Boolean).length}
               convertingPage={convertingPage}
+              isAudio={currentFileKind === 'audio'}
               output={liveOutput}
             />
           </div>
@@ -610,6 +657,7 @@ export default function App() {
         hasImage={hasPages || hasBatchFiles}
         hasConfig={!!config}
         convertingPage={convertingPage}
+        isAudio={currentFileKind === 'audio'}
         batchStatus={batchStatus}
         totalFiles={batchFiles.filter(Boolean).length}
         filesConverted={filesConverted}
@@ -617,6 +665,8 @@ export default function App() {
         filesFailed={filesFailed}
         outputFolder={outputFolder}
         showConflictDialog={showConflictDialog}
+        activeModel={activeModel}
+        usageInfo={usageInfo}
         onConvert={handleConvert}
         onAbort={handleAbort}
         onConvertWithFolder={handleConvertWithFolder}

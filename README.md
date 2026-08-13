@@ -7,9 +7,11 @@ Desktop app that converts paper notes (photos/PDFs) and audio recordings into di
 - Drag & drop images, PDFs, or audio files
 - Batch processing for multiple files (documents and audio can be mixed in one batch)
 - Configurable LLM provider (OpenAI, Anthropic, LM Studio, Gemini, Ollama, OpenRouter, or OpenAI-compatible)
-- Audio transcription (OpenAI, Gemini, and Mistral only) with best-effort timestamps and speaker labels
-- Fetch available models from provider API
+- Audio transcription (OpenAI, Gemini, Mistral, and OpenRouter) with best-effort timestamps and speaker labels
+- Fetch available models from provider API, filtered to what actually works for the field being configured where the provider's catalog supports it (vision-capable models on OpenRouter, audio-capable models everywhere audio is supported)
 - Manual model input as fallback
+- Model and Audio Model selections are remembered per provider, so switching providers and back recalls what you last picked instead of resetting
+- Status bar shows the model in use and token usage/cost for the last conversion where the provider reports it
 - Conflict resolution when output files already exist (rename, overwrite, skip)
 - Real-time streaming output during conversion
 - Editable markdown output
@@ -52,11 +54,11 @@ Note: `@napi-rs/canvas` (used by the CLI's PDF rendering) and electron-builder's
 
 On first launch, configure your LLM provider in the app settings panel:
 
-1. **Select provider** — OpenAI, Anthropic, LM Studio, Gemini, Ollama, OpenRouter, or OpenAI-compatible. Each provider remembers its own API key: switching providers recalls that provider's previously-saved key (or leaves the field blank if you've never entered one for it) rather than carrying over whatever was in the field for the last provider.
+1. **Select provider** — OpenAI, Anthropic, LM Studio, Gemini, Ollama, OpenRouter, or OpenAI-compatible. Each provider remembers its own API key, base URL, Model, and Audio Model: switching providers recalls whatever you last set for that provider (or leaves fields blank/at their default if you've never configured it) rather than carrying over whatever was in the fields for the last provider.
 2. **Enter API key** — required for cloud providers (optional for LM Studio/Ollama)
 3. **Set base URL** — required for LM Studio and Ollama (e.g., `http://localhost:1234/v1` for LM Studio)
 4. **Fetch models** — click "Fetch Models" to load available models, or enter a model name manually
-5. **Select model** — the Model dropdown is filtered to models with "ocr" in their name (Mistral is the only provider whose catalog has these); if none match, it falls back to a curated list of five well-known vision-capable models for that provider. Pick "Other..." to enter any model manually — nothing stops you from choosing a non-OCR model, the filtering is just to surface the right defaults
+5. **Select model** — the Model dropdown shows every model the provider's endpoint returns, unfiltered, except on OpenRouter, where it's filtered to vision-capable models (its catalog is large — around 400 models — and mostly not vision-capable, so filtering surfaces the ones that actually work for document/image conversion). Pick "Other..." to enter any model manually if you'd rather not fetch, the endpoint doesn't support listing models, or you want a model outside the filtered list
 6. **Set output folder** — click "Browse" to choose where converted markdown files will be saved
 
 ### LM Studio Setup
@@ -77,7 +79,7 @@ On first launch, configure your LLM provider in the app settings panel:
 
 1. Select `openrouter` as the provider — base URL is pre-filled with `https://openrouter.ai/api/v1`
 2. Enter your [OpenRouter API key](https://openrouter.ai/keys)
-3. Click "Fetch Models" and pick a vision-capable model (the Model dropdown falls back to a curated list of well-known vision-capable OpenRouter slugs since OpenRouter's catalog has no "ocr"-named models), or enter a model slug manually (e.g. `openai/gpt-4o`, `google/gemini-2.5-flash`)
+3. Click "Fetch Models" — the Model dropdown is filtered to OpenRouter's vision-capable models automatically, or enter a model slug manually (e.g. `openai/gpt-4o`, `google/gemini-2.5-flash`)
 4. OpenRouter also supports audio transcription (see below) — routed through the OpenAI-compatible chat completions path, so pick an audio-capable model on OpenRouter for the Audio Model field
 
 ### Audio Transcription
@@ -86,14 +88,17 @@ Drag in an audio file (`.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.webm`, `.aac`)
 
 **Only OpenAI, Gemini, Mistral, and OpenRouter support audio transcription.** Anthropic, Ollama, LM Studio, and generic OpenAI-compatible providers will show an error if you try to convert an audio file with one of them selected — switch providers first.
 
-Each supported provider gets its own **Audio Model** field in the settings panel (separate from the document/vision model, since the audio-capable model is often different — e.g. OpenAI's `gpt-4o-audio-preview` vs. its vision model `gpt-4o`). Like the Model field, it's a dropdown filtered to models whose name suggests audio/transcription support (`audio`, `voxtral`, `whisper`, `transcribe`); if none of the fetched models match, it falls back to a curated list of five well-known audio-capable models for that provider. Pick "Other..." to enter any model manually.
+Each supported provider gets its own **Audio Model** field in the settings panel (separate from the document/vision model, since the audio-capable model is often different — e.g. OpenAI's `gpt-4o-audio-preview` vs. its vision model `gpt-4o`). Unlike the Model field, the Audio Model dropdown is filtered to audio-capable models: on OpenRouter it queries the catalog's dedicated transcription models directly (the same set as [openrouter.ai/models?output_modalities=transcription](https://openrouter.ai/models?output_modalities=transcription) — e.g. `openai/whisper-1`, `openai/gpt-transcribe`, `mistralai/voxtral-mini-transcribe`); on OpenAI and Mistral, where the `/models` endpoint doesn't expose modality info, it matches well-known audio model naming (`audio`, `whisper`, `transcribe` for OpenAI; `voxtral` for Mistral); on Gemini every returned model already supports audio input. Pick "Other..." to enter any model manually if the one you want isn't listed.
 
 The transcript is grouped into blocks by speaker turn, not one line per utterance: each block is a bold header (`**Speaker 1 · 00:01:23**`, or just `**00:01:23**` if speakers can't be distinguished) on its own line, followed by the full turn as a paragraph. Consecutive sentences from the same speaker are merged into one block; a new block starts only on a speaker change or a pause of roughly 30 seconds or more.
+
+**OpenRouter and long recordings:** OpenRouter's dedicated transcription models (the ones from the `output_modalities=transcription` list above) go through a synchronous endpoint that's unreliable for long single requests — OpenRouter's docs cite a 60-second upstream processing timeout, but testing here showed a long single-file request can also fail client-side (a bare network error) even when OpenRouter's own request log shows it was routed and returned OK, pointing at a client/connection-duration limit rather than purely that documented timeout. Either way, the desktop app works around it by splitting recordings into sequential 5-minute MP3 chunks via a bundled `ffmpeg` binary ([`ffmpeg-static`](https://github.com/eugeneware/ffmpeg-static)), transcribing each one in turn, and stitching the results back together; this doesn't affect OpenAI, Gemini, or Mistral, which aren't subject to this limit. MP3 (128kbps) rather than WAV keeps each chunk's upload small and fast — a 5-minute WAV chunk is roughly 50MB, the equivalent MP3 a fraction of that — which is the main lever against a connection-duration issue regardless of its exact cause. Splitting happens in Electron's main process and processes the file as a stream, so it stays cheap regardless of the recording's length or format (mp3/m4a/wav/ogg/etc. are all handled the same way) — an earlier version of this fix decoded audio in the renderer instead, which could exhaust memory and crash the window on long recordings; ffmpeg replaced that entirely. This splitting is desktop-app-only (the standalone CLI has no bundled ffmpeg), so long files converted via the CLI still risk the same failure unsplit.
 
 Output format differs by provider:
 
 - **OpenAI and Gemini** transcribe by prompting the model to write markdown directly in this grouped shape. **This is best-effort, not guaranteed diarization or grouping** — block boundaries, timestamps, and speaker attribution are the model's own judgment calls and may be imprecise, especially with overlapping speech or similar-sounding voices.
 - **Mistral** uses its dedicated Voxtral transcription endpoint with `diarize: true` and segment-level timestamps, which does real speaker diarization rather than a prompted guess. The grouping into blocks (by speaker + the 30-second gap rule) is done deterministically in code from those real segments, not left to the model — so both the labels and the grouping are more reliable than the prompted providers.
+- **OpenRouter's dedicated transcription models, and OpenAI's own whisper-1/gpt-4o-transcribe fallback,** return plain, unstructured text with no speaker labels or timestamps — these are raw speech-to-text endpoints, not chat models that can follow formatting instructions. The app groups that flat text into readable paragraphs client-side (a few sentences per paragraph) so output isn't one giant unbroken line; there's no speaker/timestamp information for these to include, since the endpoint itself doesn't return any.
 
 ### Environment Variables (Optional)
 
@@ -185,6 +190,7 @@ Upload multiple files at once. After selecting an output folder, choose how to h
 - **Build**: Vite + electron-builder
 - **PDF Rendering**: pdfjs-dist
 - **LLM Integration**: OpenAI SDK, Anthropic SDK
+- **Audio processing**: bundled `ffmpeg` (via `ffmpeg-static`), for splitting long recordings before transcription on OpenRouter
 - **UI**: Custom dark theme (Catppuccin Mocha palette)
 
 ## Security
