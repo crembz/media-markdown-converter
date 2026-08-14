@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppConfig, getDefaultConfig } from '../services/config';
+import { supportsAudio as providerSupportsAudio } from '../services/providerDefaults';
 import { fetchAvailableModels, fetchAudioCapableModels, fetchVisionCapableModels } from '../services/llm';
 
 type ConfigPanelProps = {
@@ -10,14 +11,27 @@ type ConfigPanelProps = {
 
 const LOCAL_PROVIDERS: AppConfig['provider'][] = ['lmstudio', 'ollama'];
 
+// anthropic, gemini and openai are deliberately not offered here. This is a
+// UI restriction only — llm.ts, PROVIDER_DEFAULTS and the CLI still support
+// them fully, so `--provider anthropic`, the VITE_LLM_* env vars, and any
+// config already saved with one of them keep working. Reach them through
+// openai-compatible / openrouter, or add them back to this list.
+const REMOTE_PROVIDERS: AppConfig['provider'][] = ['mistral', 'openai-compatible', 'openrouter'];
+
 const PROVIDER_OPTIONS: AppConfig['provider'][] = [
   ...LOCAL_PROVIDERS,
-  ...(['anthropic', 'gemini', 'mistral', 'openai', 'openai-compatible', 'openrouter'] as AppConfig['provider'][])
-    .filter((p) => !LOCAL_PROVIDERS.includes(p))
-    .sort(),
+  ...REMOTE_PROVIDERS.filter((p) => !LOCAL_PROVIDERS.includes(p)).sort(),
 ];
 
-const AUDIO_CAPABLE_PROVIDERS: AppConfig['provider'][] = ['openai', 'gemini', 'mistral', 'openrouter'];
+/**
+ * Offered providers that can also transcribe audio. Derived from the list
+ * above rather than hardcoded into the hint text, so it can never name a
+ * provider the dropdown no longer offers.
+ */
+const AUDIO_CAPABLE_OPTIONS = PROVIDER_OPTIONS.filter(providerSupportsAudio);
+
+// Imported rather than redeclared: llm.ts rejects audio for anything outside
+// this list, so a local copy here could silently disagree with it.
 
 function sortModels(models: string[]): string[] {
   return [...models].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
@@ -43,6 +57,9 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
   const [showManualModel, setShowManualModel] = useState(false);
   const [showManualAudioModel, setShowManualAudioModel] = useState(false);
   const [outputFolder, setOutputFolder] = useState('');
+  // Identifies the newest model fetch. A slow response for a provider the user
+  // has since switched away from used to overwrite the new provider's lists.
+  const fetchTokenRef = useRef(0);
   const syncDefaults = useCallback(
     (prov: AppConfig['provider']) => {
       const defaults = getDefaultConfig(prov);
@@ -102,8 +119,14 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     setOutputFolder(config?.outputFolder || '');
   }, [config, syncDefaults]);
 
+  // Any in-flight fetch resolving after unmount must not set state.
+  useEffect(() => () => { fetchTokenRef.current += 1; }, []);
+
   const handleProviderChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const next = e.target.value as AppConfig['provider'];
+    // Invalidates any in-flight model fetch for the previous provider.
+    fetchTokenRef.current += 1;
+    setFetchingModels(false);
     setProvider(next);
     syncDefaults(next);
     // Recall this provider's previously-selected model, or suggest the
@@ -129,22 +152,27 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
     setErrors({});
   };
 
-  const supportsAudio = AUDIO_CAPABLE_PROVIDERS.includes(provider);
+  const supportsAudio = providerSupportsAudio(provider);
 
   const handleFetchModels = async () => {
+    const token = (fetchTokenRef.current += 1);
+    const requestedProvider = provider;
+
     setFetchingModels(true);
     setFetchError(null);
     try {
       const [models, audioCapableModels] = await Promise.all([
-        provider === 'openrouter'
-          ? fetchVisionCapableModels(provider, apiKey, baseUrl)
-          : fetchAvailableModels(provider, apiKey, baseUrl),
-        supportsAudio ? fetchAudioCapableModels(provider, apiKey, baseUrl) : Promise.resolve([]),
+        requestedProvider === 'openrouter'
+          ? fetchVisionCapableModels(requestedProvider, apiKey, baseUrl)
+          : fetchAvailableModels(requestedProvider, apiKey, baseUrl),
+        supportsAudio ? fetchAudioCapableModels(requestedProvider, apiKey, baseUrl) : Promise.resolve([]),
       ]);
+      if (token !== fetchTokenRef.current) return;
       setAvailableModels(sortModels(models));
       setAudioModels(sortModels(audioCapableModels));
       setFetchingModels(false);
     } catch (e) {
+      if (token !== fetchTokenRef.current) return;
       setFetchError(e instanceof Error ? e.message : 'Failed to fetch models');
       setFetchingModels(false);
     }
@@ -247,6 +275,14 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
             onChange={handleProviderChange}
             aria-invalid={!!errors.provider}
           >
+            {/* A config saved with a provider that is no longer offered still
+                needs an option of its own — without one the select renders
+                blank and misrepresents what the app will actually use. It
+                stays selectable so switching away from it isn't a one-way
+                door, but it isn't in the list for anyone else. */}
+            {!PROVIDER_OPTIONS.includes(provider) && (
+              <option value={provider}>{provider} (current)</option>
+            )}
             {PROVIDER_OPTIONS.map((opt) => (
               <option key={opt} value={opt}>
                 {opt}
@@ -301,14 +337,19 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
             {availableModels.length > 0 && !showManualModel ? (
               <select
                 id="model"
-                value={availableModels.includes(model) ? model : '__custom__'}
+                value={model || ''}
                 onChange={handleModelSelect}
                 aria-invalid={!!errors.model}
               >
-                {availableModels.length > 0 && (
-                  <option value="" disabled>
-                    Select a model
-                  </option>
+                <option value="" disabled>
+                  Select a model
+                </option>
+                {/* A configured model that isn't in the fetched list still
+                    needs an option of its own, or the select renders blank and
+                    React warns about a value with no matching option — which
+                    is what the old '__custom__' sentinel did. */}
+                {model && !availableModels.includes(model) && (
+                  <option value={model}>{model} (current)</option>
                 )}
                 {availableModels.map((m) => (
                   <option key={m} value={m}>
@@ -361,13 +402,14 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
                 {audioModels.length > 0 && !showManualAudioModel ? (
                   <select
                     id="audioModel"
-                    value={audioModels.includes(audioModel) ? audioModel : '__custom__'}
+                    value={audioModel || ''}
                     onChange={handleAudioModelSelect}
                   >
-                    {audioModels.length > 0 && (
-                      <option value="" disabled>
-                        Select a model
-                      </option>
+                    <option value="" disabled>
+                      Select a model
+                    </option>
+                    {audioModel && !audioModels.includes(audioModel) && (
+                      <option value={audioModel}>{audioModel} (current)</option>
                     )}
                     {audioModels.map((m) => (
                       <option key={m} value={m}>
@@ -391,7 +433,9 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
               </span>
             </>
           ) : (
-            <span className="form-hint">{provider} does not support audio transcription. Switch to OpenAI, Gemini, Mistral, or OpenRouter to transcribe audio.</span>
+            <span className="form-hint">
+              {provider} does not support audio transcription. Switch to {AUDIO_CAPABLE_OPTIONS.join(' or ')} to transcribe audio.
+            </span>
           )}
         </div>
 
@@ -465,274 +509,6 @@ export default function ConfigPanel({ config, onSave, onClose }: ConfigPanelProp
         </div>
       </div>
 
-      <style>{styles}</style>
     </div>
   );
 }
-
-const styles = `
-  .config-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.65);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .config-panel {
-    background: #1e1e2e;
-    color: #cdd6f4;
-    border-radius: 12px;
-    padding: 32px;
-    width: 420px;
-    max-width: 90vw;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  }
-
-  .config-panel h2 {
-    margin: 0 0 24px;
-    font-size: 1.25rem;
-    color: #cdd6f4;
-  }
-
-  .form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    font-size: 0.85rem;
-    color: #a6adc8;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .required-badge {
-    font-size: 0.7rem;
-    background: #f38ba8;
-    color: #1e1e2e;
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-weight: 600;
-  }
-
-  .form-group select,
-  .form-group input {
-    background: #313244;
-    border: 1px solid #45475a;
-    border-radius: 6px;
-    color: #cdd6f4;
-    padding: 8px 12px;
-    font-size: 0.9rem;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-
-  .form-group select:focus,
-  .form-group input:focus {
-    border-color: #89b4fa;
-  }
-
-  .form-group input[aria-invalid='true'],
-  .form-group select[aria-invalid='true'] {
-    border-color: #f38ba8;
-  }
-
-  .error {
-    font-size: 0.75rem;
-    color: #f38ba8;
-  }
-
-  .form-hint {
-    font-size: 0.75rem;
-    color: #a6adc8;
-  }
-
-  .use-apikey-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.8rem;
-    color: #a6adc8;
-    cursor: pointer;
-    margin-bottom: 4px;
-  }
-
-  .use-apikey-toggle input[type='checkbox'] {
-    accent-color: #89b4fa;
-    width: 14px;
-    height: 14px;
-    cursor: pointer;
-  }
-
-  .password-input {
-    display: flex;
-    gap: 8px;
-  }
-
-  .password-input input {
-    flex: 1;
-  }
-
-  .toggle-visibility {
-    background: #313244;
-    border: 1px solid #45475a;
-    border-radius: 6px;
-    color: #a6adc8;
-    padding: 0 12px;
-    font-size: 0.8rem;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 0.15s;
-  }
-
-  .toggle-visibility:hover {
-    background: #45475a;
-  }
-
-  .model-row {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .model-row select {
-    flex: 1;
-    min-width: 0;
-    max-width: 200px;
-  }
-
-  .btn-fetch {
-    background: #89b4fa;
-    border: none;
-    color: #1e1e2e;
-    padding: 8px 14px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.85rem;
-    font-weight: 600;
-    white-space: nowrap;
-    transition: opacity 0.15s;
-  }
-
-  .btn-fetch:hover:not(:disabled) {
-    opacity: 0.85;
-  }
-
-  .btn-fetch:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .fetch-error {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .btn-retry {
-    background: transparent;
-    border: 1px solid #89b4fa;
-    color: #89b4fa;
-    padding: 2px 10px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-retry:hover {
-    background: rgba(137, 180, 250, 0.15);
-  }
-
-  .config-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 12px;
-    margin-top: 24px;
-  }
-
-  .btn-cancel {
-    background: transparent;
-    border: 1px solid #45475a;
-    color: #a6adc8;
-    padding: 8px 20px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.9rem;
-    transition: background 0.15s;
-  }
-
-  .btn-cancel:hover {
-    background: #313244;
-  }
-
-  .btn-save {
-    background: #89b4fa;
-    border: none;
-    color: #1e1e2e;
-    padding: 8px 20px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.9rem;
-    font-weight: 600;
-    transition: opacity 0.15s;
-  }
-
-  .btn-save:hover {
-    opacity: 0.85;
-  }
-
-  .output-folder-row {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .output-folder-row input {
-    flex: 1;
-  }
-
-  .output-folder-actions {
-    display: flex;
-    gap: 6px;
-  }
-
-  .btn-browse {
-    background: #89b4fa;
-    border: none;
-    color: #1e1e2e;
-    padding: 8px 14px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.85rem;
-    font-weight: 600;
-    white-space: nowrap;
-    transition: opacity 0.15s;
-  }
-
-  .btn-browse:hover {
-    opacity: 0.85;
-  }
-
-  .btn-clear {
-    background: transparent;
-    border: 1px solid #45475a;
-    color: #a6adc8;
-    padding: 8px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.8rem;
-    transition: background 0.15s;
-  }
-
-  .btn-clear:hover {
-    background: #313244;
-  }
-`;

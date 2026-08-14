@@ -1,12 +1,14 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useDropzone, type DropzoneOptions } from 'react-dropzone';
 import { isAudioFile } from '../utils/fileKind';
+import { resizeIfNeeded } from '../utils/image';
+import type { BatchFile } from '../types';
 
 interface ImageUploaderProps {
   onImageSelect: (dataUri: string, filename: string) => void;
   onPdfSelect: (pages: string[], filename: string) => void;
   onAudioSelect: (dataUri: string, filename: string) => void;
-  onFilesSelected: (files: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' }>) => void;
+  onFilesSelected: (files: BatchFile[]) => void;
   onLoadingState: (loading: boolean) => void;
   onError?: (message: string) => void;
 }
@@ -26,33 +28,6 @@ const ACCEPTED_TYPES: Record<string, string[]> = {
   'audio/aac': ['.aac'],
 };
 
-function compressCanvas(canvas: HTMLCanvasElement, quality: number): string {
-  return canvas.toDataURL('image/jpeg', quality);
-}
-
-function resizeIfNeeded(dataUri: string, maxWidth: number): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      if (img.width <= maxWidth && img.height <= maxWidth) {
-        resolve(dataUri);
-        return;
-      }
-      const canvas = document.createElement('canvas');
-      const scale = Math.min(maxWidth / img.width, maxWidth / img.height);
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      }
-      resolve(compressCanvas(canvas, 0.75));
-    };
-    img.onerror = () => reject(new Error('Failed to load image for resizing'));
-    img.src = dataUri;
-  });
-}
-
 async function readFileAsDataUri(file: File): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -71,7 +46,7 @@ async function readFileAsDataUri(file: File): Promise<string> {
 
 async function processUploadedImage(file: File, dataUri: string): Promise<string> {
   if (file.size > 2 * 1024 * 1024) {
-    return resizeIfNeeded(dataUri, 2048);
+    return resizeIfNeeded(dataUri);
   }
   return dataUri;
 }
@@ -111,38 +86,58 @@ export default function ImageUploader({ onImageSelect, onPdfSelect, onAudioSelec
           onLoadingState(false);
         }
       } else {
-        setIsLoading(true);
-        onLoadingState(true);
-        const batchFiles: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' }> = [];
+        // No loading state here: this branch only reads paths off the File
+        // objects, so it finishes in the same tick — flipping the flag on and
+        // straight back off just flashed "Rendering PDF pages..." at the user.
+        const batchFiles: BatchFile[] = [];
+        const unresolved: string[] = [];
 
         for (const file of acceptedFiles) {
+          // Batch conversion reads each file from disk by path — the renderer
+          // never holds the bytes. Queueing an entry with an empty path
+          // produced a file that was never converted and never reported as
+          // failed, so drop it here and name it in an error instead.
+          //
+          // Resolved through the preload bridge rather than the non-standard
+          // File.path, which Electron removed in v32.
+          const filePath = typeof window.electronAPI !== 'undefined'
+            ? window.electronAPI.getPathForFile(file)
+            : '';
+          if (!filePath) {
+            unresolved.push(file.name);
+            continue;
+          }
+
           const isPdf = file.type === 'application/pdf';
           const isAudio = isAudioFile(file.name);
           batchFiles.push({
-            filePath: file.path || '',
+            filePath,
             filename: file.name,
             fileType: isPdf ? 'pdf' : isAudio ? 'audio' : 'image',
           });
         }
 
-        onLoadingState(false);
-        setIsLoading(false);
-
         if (batchFiles.length > 0) {
           onFilesSelected(batchFiles);
+        }
+
+        // Reported after onFilesSelected, which resets the app-level error.
+        if (unresolved.length > 0) {
+          const message = `Could not read a file path for: ${unresolved.join(', ')}. Add them with "Browse Files" instead.`;
+          setError(message);
+          onError?.(message);
         }
       }
     },
     [onImageSelect, onPdfSelect, onAudioSelect, onFilesSelected, onLoadingState, onError],
   );
 
-  const dropzoneOptions: DropzoneOptions = {
-    onDrop,
-    accept: ACCEPTED_TYPES,
-    multiple: true,
-  };
+  const dropzoneOptions = useMemo<DropzoneOptions>(
+    () => ({ onDrop, accept: ACCEPTED_TYPES, multiple: true }),
+    [onDrop],
+  );
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone(dropzoneOptions);
+  const { getRootProps, getInputProps, isDragActive, open } = useDropzone(dropzoneOptions);
 
   return (
     <div className="image-uploader">
@@ -194,10 +189,9 @@ export default function ImageUploader({ onImageSelect, onPdfSelect, onAudioSelec
         disabled={isLoading}
         onClick={() => {
           setError(null);
-          const input = document.querySelector('.dropzone input[type="file"]');
-          if (input instanceof HTMLInputElement) {
-            input.click();
-          }
+          // react-dropzone's own opener, rather than reaching into the DOM for
+          // its hidden input by class name.
+          open();
         }}
       >
         Browse Files

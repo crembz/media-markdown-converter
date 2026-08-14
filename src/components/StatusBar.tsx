@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { UsageInfo } from '../services/llm';
 
 interface StatusBarProps {
@@ -31,6 +31,29 @@ function formatUsage(usage: UsageInfo): string | null {
   return parts.length > 0 ? parts.join(' · ') : null;
 }
 
+const SUMMARY_COLORS = {
+  converted: '#4ade80',
+  skipped: '#facc15',
+  failed: '#f87171',
+} as const;
+
+/** Coloured "3 converted, 1 skipped" line; null when every count is zero. */
+function renderSummary(converted: number, skipped: number, failed: number): React.ReactNode | null {
+  const items: { label: string; color: string }[] = [];
+  if (converted > 0) items.push({ label: `${converted} converted`, color: SUMMARY_COLORS.converted });
+  if (skipped > 0) items.push({ label: `${skipped} skipped`, color: SUMMARY_COLORS.skipped });
+  if (failed > 0) items.push({ label: `${failed} failed`, color: SUMMARY_COLORS.failed });
+
+  if (items.length === 0) return null;
+
+  return items.map((item, i) => (
+    <span key={item.label}>
+      {i > 0 && ', '}
+      <span style={{ color: item.color }}>{item.label}</span>
+    </span>
+  ));
+}
+
 function Spinner(): React.ReactElement {
   return (
     <svg
@@ -58,7 +81,7 @@ function Spinner(): React.ReactElement {
   );
 }
 
-export default function StatusBar({
+function StatusBar({
   isProcessing,
   error,
   onAbort,
@@ -78,7 +101,9 @@ export default function StatusBar({
   onConvertWithFolder,
   onOpenFolder,
 }: StatusBarProps): React.ReactElement {
-  let statusClass = '';
+  // Every branch below assigns both, so no initialiser is needed — the `''`
+  // one was dead in every path.
+  let statusClass: string;
   let statusContent: React.ReactNode;
 
   if (error) {
@@ -97,34 +122,14 @@ export default function StatusBar({
   } else if (batchStatus === 'processing') {
     statusContent = `Processing files... (${filesConverted}/${totalFiles})`;
     statusClass = 'status-processing';
-  } else if (batchStatus === 'done') {
-    const items: { label: string; color: string }[] = [];
-    if (filesConverted > 0) items.push({ label: `${filesConverted} converted`, color: '#4ade80' });
-    if (filesSkipped > 0) items.push({ label: `${filesSkipped} skipped`, color: '#facc15' });
-    if (filesFailed > 0) items.push({ label: `${filesFailed} failed`, color: '#f87171' });
-    statusContent = items.length > 0
-      ? items.map((item, i) => (
-          <span key={i}>
-            {i > 0 && ', '}
-            <span style={{ color: item.color }}>{item.label}</span>
-          </span>
-        ))
-      : 'Done — no files converted';
-    statusClass = 'status-done';
-  } else if (batchStatus === 'error') {
-    const items: { label: string; color: string }[] = [];
-    if (filesConverted > 0) items.push({ label: `${filesConverted} converted`, color: '#4ade80' });
-    if (filesSkipped > 0) items.push({ label: `${filesSkipped} skipped`, color: '#facc15' });
-    if (filesFailed > 0) items.push({ label: `${filesFailed} failed`, color: '#f87171' });
-    statusContent = items.length > 0
-      ? items.map((item, i) => (
-          <span key={i}>
-            {i > 0 && ', '}
-            <span style={{ color: item.color }}>{item.label}</span>
-          </span>
-        ))
-      : `Error — ${filesConverted} of ${totalFiles} files converted`;
-    statusClass = 'status-error';
+  } else if (batchStatus === 'done' || batchStatus === 'error') {
+    // One summary for both outcomes; they differ only in the fallback text
+    // shown when nothing at all was counted, and in the status class.
+    const summary = renderSummary(filesConverted, filesSkipped, filesFailed);
+    statusContent = summary ?? (batchStatus === 'done'
+      ? 'Done — no files converted'
+      : `Error — ${filesConverted} of ${totalFiles} files converted`);
+    statusClass = batchStatus === 'done' ? 'status-done' : 'status-error';
   } else if (!hasConfig) {
     statusContent = 'Configure your LLM provider to begin';
     statusClass = '';
@@ -188,3 +193,5 @@ export default function StatusBar({
     </div>
   );
 }
+
+export default memo(StatusBar);

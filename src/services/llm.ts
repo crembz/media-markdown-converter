@@ -2,8 +2,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { AppConfig } from '../types';
 import { OCR_SYSTEM_PROMPT, AUDIO_TRANSCRIPTION_SYSTEM_PROMPT } from '../utils/prompt';
-
-const AUDIO_CAPABLE_PROVIDERS = new Set(['openai', 'gemini', 'mistral', 'openrouter']);
+import { supportsAudio } from './providerDefaults';
 
 // Best-effort token/cost accounting, reported via the optional onUsage
 // callback alongside onChunk. Only populated for providers/paths whose
@@ -41,6 +40,16 @@ function extractBase64(dataUri: string): string {
   return commaIndex !== -1 ? dataUri.slice(commaIndex + 1) : dataUri;
 }
 
+// Multipart upload body for the dedicated transcription endpoints. Both of
+// them previously hand-rolled the same char-by-char decode loop.
+function audioFormData(base64: string, mimeType: string, model: string): FormData {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: mimeType }), `audio.${mimeType.split('/').pop() || 'mp3'}`);
+  form.append('model', model);
+  return form;
+}
+
 // The input_audio content part's format field wants a plain container name
 // (e.g. "mp3", "wav", "m4a") rather than a MIME subtype. Most subtypes
 // already match (audio/wav -> wav), but audio/mpeg is the standard MIME
@@ -53,7 +62,7 @@ const AUDIO_FORMAT_SUBTYPE_ALIASES: Record<string, string> = {
   mp4: 'm4a',
 };
 
-function getInputAudioFormat(mimeType: string): string {
+export function getInputAudioFormat(mimeType: string): string {
   const subtype = mimeType.split('/').pop()?.toLowerCase() || 'mp3';
   return AUDIO_FORMAT_SUBTYPE_ALIASES[subtype] || subtype;
 }
@@ -69,14 +78,21 @@ async function fetchOrThrow(url: string, init: RequestInit, label: string): Prom
   } catch (err) {
     if (err && typeof err === 'object' && 'name' in err && err.name === 'AbortError') throw err;
     const cause = err instanceof Error ? err.message : String(err);
-    throw new Error(`Network request to ${label} failed (${url}): ${cause}. Check the base URL and network connection.`);
+    throw new Error(
+      `Network request to ${label} failed (${url}): ${cause}. Check the base URL and network connection.`,
+      { cause: err },
+    );
   }
 }
 
-async function convertWithOpenAI(
+// One streaming chat-completions call. The image and audio paths differ only
+// in their system prompt and the shape of the single user content part, so
+// they share this rather than keeping two copies of the stream loop.
+async function streamOpenAIChat(
   client: OpenAI,
   model: string,
-  imageBase64: string,
+  systemPrompt: string,
+  content: OpenAI.Chat.Completions.ChatCompletionContentPart[],
   onChunk: (text: string) => void,
   signal: AbortSignal,
   onUsage?: (usage: UsageInfo) => void,
@@ -89,16 +105,8 @@ async function convertWithOpenAI(
       // when this is explicitly requested.
       stream_options: { include_usage: true },
       messages: [
-        { role: 'system', content: OCR_SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'image_url',
-              image_url: { url: imageBase64 },
-            },
-          ],
-        },
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content },
       ],
     },
     { signal },
@@ -138,7 +146,14 @@ async function convertWithAnthropic(
   const stream = await client.messages.stream(
     {
       model,
-      max_tokens: 4096,
+      // A ceiling, not a reservation — unused headroom costs nothing, and
+      // hitting it truncates the transcription silently (the response just
+      // stops, with stop_reason "max_tokens", and the partial page gets
+      // written to disk as if complete). 4096 was not enough for a dense
+      // page, and on models where thinking is on by default it is shared
+      // between reasoning and the transcription itself. 32000 clears every
+      // current Claude model's per-model cap while leaving ample room.
+      max_tokens: 32000,
       system: OCR_SYSTEM_PROMPT,
       messages: [
         {
@@ -190,6 +205,37 @@ async function convertWithAnthropic(
   return fullText;
 }
 
+// Shared by the image and audio paths. Plain 'openai' deliberately never gets
+// baseURL overridden: config.baseUrl for openai defaults to
+// "https://api.openai.com" (no /v1), which is a display value only —
+// overriding with it breaks every request, since the SDK's own default
+// ("https://api.openai.com/v1") is what's actually correct.
+function createOpenAIClient(config: AppConfig): OpenAI {
+  const opts: ConstructorParameters<typeof OpenAI>[0] = {
+    apiKey: config.apiKey || 'not-needed',
+    dangerouslyAllowBrowser: true,
+  };
+
+  const usesCustomBaseUrl =
+    config.provider === 'openai-compatible' ||
+    config.provider === 'lmstudio' ||
+    config.provider === 'ollama' ||
+    config.provider === 'mistral' ||
+    config.provider === 'openrouter';
+
+  if (usesCustomBaseUrl && config.baseUrl) {
+    opts.baseURL = config.provider === 'ollama' && !config.baseUrl.endsWith('/v1')
+      ? `${config.baseUrl.replace(/\/+$/, '')}/v1`
+      : config.baseUrl;
+  }
+
+  if (config.provider === 'openrouter') {
+    opts.defaultHeaders = { 'X-Title': 'Media Markdown Converter' };
+  }
+
+  return new OpenAI(opts);
+}
+
 export async function convertImageToMarkdown(
   config: AppConfig,
   imageBase64: string,
@@ -212,22 +258,32 @@ export async function convertImageToMarkdown(
   signal.throwIfAborted();
 
   if (config.provider === 'anthropic') {
-    const anthropicOpts: Record<string, unknown> = {
+    const client = new Anthropic({
       apiKey: config.apiKey,
       dangerouslyAllowBrowser: true,
-    };
-    const client = new Anthropic(anthropicOpts as never);
+    });
 
-    const result = await convertWithAnthropic(client, config.model, imageBase64, onChunk, signal, onUsage);
-    (client as unknown as Record<string, unknown>)['lastResponse'] = undefined;
-    return result;
+    return convertWithAnthropic(client, config.model, imageBase64, onChunk, signal, onUsage);
   }
 
   if (config.provider === 'gemini') {
     if (!config.apiKey) {
       throw new Error('Gemini API key is not configured. Please set your LLM API key in the config panel.');
     }
-    return convertWithGemini(config.apiKey, config.model, imageBase64, onChunk, signal, onUsage);
+    return streamGemini(
+      config.apiKey,
+      config.model,
+      [
+        // The OCR instructions used to be omitted entirely on this path —
+        // every other provider sends them, so Gemini was transcribing with no
+        // formatting or output rules at all.
+        { text: OCR_SYSTEM_PROMPT },
+        { inline_data: { mime_type: extractMediaType(imageBase64), data: extractBase64(imageBase64) } },
+      ],
+      onChunk,
+      signal,
+      onUsage,
+    );
   }
 
   if (config.provider === 'mistral' && config.model.toLowerCase().includes('ocr')) {
@@ -237,78 +293,15 @@ export async function convertImageToMarkdown(
     return convertWithMistralOcr(config.apiKey, config.baseUrl || 'https://api.mistral.ai/v1', config.model, imageBase64, onChunk, signal);
   }
 
-  const openAIOpts: ConstructorParameters<typeof OpenAI>[0] = {
-    apiKey: config.apiKey || 'not-needed',
-    dangerouslyAllowBrowser: true,
-  };
-
-  if ((config.provider === 'openai-compatible' || config.provider === 'lmstudio' || config.provider === 'ollama' || config.provider === 'mistral' || config.provider === 'openrouter') && config.baseUrl) {
-    openAIOpts.baseURL = config.provider === 'ollama' && !config.baseUrl.endsWith('/v1')
-      ? `${config.baseUrl.replace(/\/+$/, '')}/v1`
-      : config.baseUrl;
-  }
-
-  if (config.provider === 'openrouter') {
-    openAIOpts.defaultHeaders = { 'X-Title': 'Media Markdown Converter' };
-  }
-
-  const client = new OpenAI(openAIOpts);
-
-  const result = await convertWithOpenAI(client, config.model, imageBase64, onChunk, signal, onUsage);
-  (client as unknown as Record<string, unknown>)['lastRequest'] = undefined;
-  return result;
-}
-
-async function convertAudioWithOpenAI(
-  client: OpenAI,
-  model: string,
-  audioBase64: string,
-  audioFormat: string,
-  onChunk: (text: string) => void,
-  signal: AbortSignal,
-  onUsage?: (usage: UsageInfo) => void,
-): Promise<string> {
-  const stream = await client.chat.completions.create(
-    {
-      model,
-      stream: true,
-      // The final SSE chunk (empty choices[]) carries usage totals only
-      // when this is explicitly requested.
-      stream_options: { include_usage: true },
-      messages: [
-        { role: 'system', content: AUDIO_TRANSCRIPTION_SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'input_audio',
-              input_audio: { data: audioBase64, format: audioFormat },
-            },
-          ],
-        } as never,
-      ],
-    },
-    { signal },
+  return streamOpenAIChat(
+    createOpenAIClient(config),
+    config.model,
+    OCR_SYSTEM_PROMPT,
+    [{ type: 'image_url', image_url: { url: imageBase64 } }],
+    onChunk,
+    signal,
+    onUsage,
   );
-
-  let fullText = '';
-
-  for await (const part of stream) {
-    const delta = part.choices[0]?.delta?.content;
-    if (delta) {
-      fullText += delta;
-      onChunk(delta);
-    }
-    if (part.usage) {
-      onUsage?.({
-        inputTokens: part.usage.prompt_tokens,
-        outputTokens: part.usage.completion_tokens,
-        totalTokens: part.usage.total_tokens,
-      });
-    }
-  }
-
-  return fullText;
 }
 
 function geminiUsage(usageMetadata: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number } | undefined): UsageInfo | undefined {
@@ -320,43 +313,42 @@ function geminiUsage(usageMetadata: { promptTokenCount?: number; candidatesToken
   };
 }
 
-async function convertAudioWithGemini(
+interface GeminiPart {
+  text?: string;
+  inline_data?: { mime_type: string; data: string };
+}
+
+// Shared by the image and audio paths, which previously kept two ~80-line
+// copies of this stream loop that differed only in their `parts` array.
+async function streamGemini(
   apiKey: string,
   model: string,
-  audioBase64: string,
-  mimeType: string,
+  parts: GeminiPart[],
   onChunk: (text: string) => void,
   signal: AbortSignal,
   onUsage?: (usage: UsageInfo) => void,
 ): Promise<string> {
   const fullModelName = model.startsWith('models/') ? model : `models/${model}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/${fullModelName}:streamGenerateContent`;
+  // alt=sse asks for line-oriented SSE framing. Without it the endpoint
+  // streams a pretty-printed JSON *array*, whose objects span many lines —
+  // the old line-by-line JSON.parse could not decode that and silently
+  // dropped whatever it failed to parse.
+  const url = `https://generativelanguage.googleapis.com/v1beta/${fullModelName}:streamGenerateContent?alt=sse`;
 
-  const body = {
-    contents: [
-      {
-        parts: [
-          { text: AUDIO_TRANSCRIPTION_SYSTEM_PROMPT },
-          { inline_data: { mime_type: mimeType, data: audioBase64 } },
-        ],
-      },
-    ],
-  };
-
-  const res = await fetch(url, {
+  const res = await fetchOrThrow(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-goog-api-key': apiKey,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ contents: [{ parts }] }),
     signal,
-  });
+  }, 'Gemini API');
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Gemini API error (${res.status}): ${text}`);
+    const text = await res.text().catch(() => '');
+    throw new Error(`Gemini API error (${res.status}): ${text.slice(0, 500)}`);
   }
 
   const reader = res.body?.getReader();
@@ -372,6 +364,34 @@ async function convertAudioWithGemini(
   let buffer = '';
   let usage: UsageInfo | undefined;
 
+  const consume = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    // Tolerate both framings: SSE "data: {...}" and a bare JSON object.
+    const payload = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+    if (!payload || payload === '[DONE]') return;
+
+    let parsed: {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+      usageMetadata?: Parameters<typeof geminiUsage>[0];
+    };
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return;
+    }
+
+    for (const part of parsed?.candidates?.[0]?.content?.parts ?? []) {
+      if (part?.text) {
+        fullText += part.text;
+        onChunk(part.text);
+      }
+    }
+    // Gemini reports cumulative totals-so-far on each chunk, so the last one
+    // seen by the time the stream ends is the final total.
+    usage = geminiUsage(parsed?.usageMetadata) ?? usage;
+  };
+
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -380,27 +400,10 @@ async function convertAudioWithGemini(
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          const chunks = parsed?.candidates?.[0]?.content?.parts || [];
-          for (const part of chunks) {
-            if (part?.text) {
-              fullText += part.text;
-              onChunk(part.text);
-            }
-          }
-          // Gemini reports cumulative totals-so-far on each chunk, so the
-          // last one seen by the time the stream ends is the final total.
-          usage = geminiUsage(parsed?.usageMetadata) ?? usage;
-        } catch {
-          // Skip unparseable chunks
-        }
-      }
+      for (const line of lines) consume(line);
     }
+    // Flush whatever the stream ended on without a trailing newline.
+    consume(buffer);
   } finally {
     reader.releaseLock();
   }
@@ -416,7 +419,7 @@ interface MistralTranscriptSegment {
   speaker_id?: string | number;
 }
 
-function formatTimestamp(seconds: number): string {
+export function formatTimestamp(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
@@ -438,7 +441,7 @@ function formatTimestamp(seconds: number): string {
 // (no text is ever dropped or altered).
 const SENTENCES_PER_PARAGRAPH = 4;
 
-function paragraphFormatFlatTranscript(text: string): string {
+export function paragraphFormatFlatTranscript(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
 
@@ -471,7 +474,7 @@ function formatTranscriptBlock(block: TranscriptBlock, speakerLabel: string | nu
   return header ? `${header}\n\n${body}` : body;
 }
 
-function formatMistralTranscript(data: { text?: string; segments?: MistralTranscriptSegment[] }): string {
+export function formatMistralTranscript(data: { text?: string; segments?: MistralTranscriptSegment[] }): string {
   const segments = data.segments;
   if (!segments || segments.length === 0) {
     return data.text || '';
@@ -536,16 +539,7 @@ async function convertAudioWithMistral(
 ): Promise<string> {
   const url = `${baseUrl.replace(/\/+$/, '')}/audio/transcriptions`;
 
-  const byteChars = atob(audioBase64);
-  const byteArray = new Uint8Array(byteChars.length);
-  for (let i = 0; i < byteChars.length; i++) {
-    byteArray[i] = byteChars.charCodeAt(i);
-  }
-  const blob = new Blob([byteArray], { type: mimeType });
-
-  const form = new FormData();
-  form.append('file', blob, `audio.${mimeType.split('/').pop() || 'mp3'}`);
-  form.append('model', model);
+  const form = audioFormData(audioBase64, mimeType, model);
   form.append('diarize', 'true');
   form.append('timestamp_granularities', 'segment');
 
@@ -638,7 +632,7 @@ const OPENROUTER_TRANSCRIPTION_CHUNK_SECONDS = 300;
 // used for both the accumulated return value and the onChunk delta so the
 // live-streamed preview matches the final text exactly instead of gluing
 // chunk boundaries together with no space.
-function chunkTextDelta(fullTextSoFar: string, chunkText: string): string {
+export function chunkTextDelta(fullTextSoFar: string, chunkText: string): string {
   return fullTextSoFar && chunkText ? ` ${chunkText}` : chunkText;
 }
 
@@ -652,6 +646,7 @@ async function convertAudioWithOpenRouterTranscription(
   signal: AbortSignal,
   onUsage?: (usage: UsageInfo) => void,
   onProgress?: (current: number, total: number) => void,
+  sourcePath?: string,
 ): Promise<string> {
   // Splitting is done by ffmpeg over IPC in Electron's main process — it
   // streams the file rather than loading it whole, so this stays cheap
@@ -668,7 +663,11 @@ async function convertAudioWithOpenRouterTranscription(
     return formatted;
   }
 
-  const { dir, files } = await window.electronAPI.splitAudio(audioBase64, OPENROUTER_TRANSCRIPTION_CHUNK_SECONDS);
+  // When the file is already on disk (batch conversion), hand ffmpeg the path
+  // instead of shipping the whole recording back across IPC as base64.
+  const { dir, files } = sourcePath
+    ? await window.electronAPI.splitAudioFile(sourcePath, OPENROUTER_TRANSCRIPTION_CHUNK_SECONDS)
+    : await window.electronAPI.splitAudio(audioBase64, OPENROUTER_TRANSCRIPTION_CHUNK_SECONDS);
 
   try {
     // A recording shorter than the chunk length still round-trips through
@@ -713,16 +712,7 @@ async function convertAudioWithOpenAITranscription(
 ): Promise<string> {
   const url = 'https://api.openai.com/v1/audio/transcriptions';
 
-  const byteChars = atob(audioBase64);
-  const byteArray = new Uint8Array(byteChars.length);
-  for (let i = 0; i < byteChars.length; i++) {
-    byteArray[i] = byteChars.charCodeAt(i);
-  }
-  const blob = new Blob([byteArray], { type: mimeType });
-
-  const form = new FormData();
-  form.append('file', blob, `audio.${mimeType.split('/').pop() || 'mp3'}`);
-  form.append('model', model);
+  const form = audioFormData(audioBase64, mimeType, model);
 
   const res = await fetchOrThrow(url, {
     method: 'POST',
@@ -762,6 +752,9 @@ export async function convertAudioToMarkdown(
   signal: AbortSignal,
   onUsage?: (usage: UsageInfo) => void,
   onProgress?: (current: number, total: number) => void,
+  /** Path to the source file when it lives on disk; enables the cheaper
+   *  path-based ffmpeg split for long OpenRouter transcriptions. */
+  sourcePath?: string,
 ): Promise<string> {
   if (config.useApiKey && !config.apiKey) {
     throw new Error('API key is not configured. Please set your LLM API key in the config panel.');
@@ -772,7 +765,7 @@ export async function convertAudioToMarkdown(
     throw new Error('Audio model is not configured. Please select an audio model in the config panel.');
   }
 
-  if (!AUDIO_CAPABLE_PROVIDERS.has(config.provider)) {
+  if (!supportsAudio(config.provider)) {
     throw new Error(`${config.provider} does not support audio transcription. Switch to OpenAI, Gemini, Mistral, or OpenRouter.`);
   }
 
@@ -784,7 +777,17 @@ export async function convertAudioToMarkdown(
     if (!config.apiKey) {
       throw new Error('Gemini API key is not configured. Please set your LLM API key in the config panel.');
     }
-    return convertAudioWithGemini(config.apiKey, audioModel, rawBase64, mimeType, onChunk, signal, onUsage);
+    return streamGemini(
+      config.apiKey,
+      audioModel,
+      [
+        { text: AUDIO_TRANSCRIPTION_SYSTEM_PROMPT },
+        { inline_data: { mime_type: mimeType, data: rawBase64 } },
+      ],
+      onChunk,
+      signal,
+      onUsage,
+    );
   }
 
   if (config.provider === 'mistral') {
@@ -795,24 +798,26 @@ export async function convertAudioToMarkdown(
   }
 
   // openai / openrouter — both use the OpenAI-compatible chat completions API
-  const openAIOpts: ConstructorParameters<typeof OpenAI>[0] = {
-    apiKey: config.apiKey || 'not-needed',
-    dangerouslyAllowBrowser: true,
-  };
-  if (config.provider === 'openrouter' && config.baseUrl) {
-    openAIOpts.baseURL = config.baseUrl;
-    openAIOpts.defaultHeaders = { 'X-Title': 'Media Markdown Converter' };
-  }
-  // Plain 'openai' deliberately does NOT get baseURL overridden here (matches
-  // convertImageToMarkdown's document path) — config.baseUrl for openai
-  // defaults to "https://api.openai.com" (no /v1), which is a display value
-  // only; overriding with it breaks every request since the SDK's own
-  // default baseURL ("https://api.openai.com/v1") is what's actually correct.
-  const client = new OpenAI(openAIOpts);
+  const client = createOpenAIClient(config);
   const audioFormat = getInputAudioFormat(mimeType);
 
   try {
-    return await convertAudioWithOpenAI(client, audioModel, rawBase64, audioFormat, onChunk, signal, onUsage);
+    return await streamOpenAIChat(
+      client,
+      audioModel,
+      AUDIO_TRANSCRIPTION_SYSTEM_PROMPT,
+      [{
+        type: 'input_audio',
+        // The SDK narrows format to 'wav' | 'mp3', but the endpoint accepts
+        // more (m4a, flac, ogg, webm…) and getInputAudioFormat deliberately
+        // passes any subtype through — see its comment. Cast just this field
+        // so the rest of the message still type-checks.
+        input_audio: { data: rawBase64, format: audioFormat as 'wav' | 'mp3' },
+      }],
+      onChunk,
+      signal,
+      onUsage,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Some models (e.g. openai/gpt-transcribe, whisper-1) are dedicated
@@ -834,6 +839,7 @@ export async function convertAudioToMarkdown(
         signal,
         onUsage,
         onProgress,
+        sourcePath,
       );
     }
 
@@ -851,7 +857,7 @@ async function convertWithMistralOcr(
 ): Promise<string> {
   const url = `${baseUrl.replace(/\/+$/, '')}/ocr`;
 
-  const res = await fetch(url, {
+  const res = await fetchOrThrow(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -862,7 +868,7 @@ async function convertWithMistralOcr(
       document: { type: 'image_url', image_url: imageBase64 },
     }),
     signal,
-  });
+  }, 'Mistral OCR API');
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -875,94 +881,6 @@ async function convertWithMistralOcr(
     .join('\n\n---\n\n') || '';
 
   onChunk(fullText);
-  return fullText;
-}
-
-async function convertWithGemini(
-  apiKey: string,
-  model: string,
-  imageBase64: string,
-  onChunk: (text: string) => void,
-  signal: AbortSignal,
-  onUsage?: (usage: UsageInfo) => void,
-): Promise<string> {
-  const mediaType = extractMediaType(imageBase64);
-  const base64Data = extractBase64(imageBase64);
-
-  const fullModelName = model.startsWith('models/') ? model : `models/${model}`;
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/${fullModelName}:streamGenerateContent`;
-
-  const body = {
-    contents: [
-      {
-        parts: [
-          { inline_data: { mime_type: mediaType, data: base64Data } },
-        ],
-      },
-    ],
-  };
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Gemini API error (${res.status}): ${text}`);
-  }
-
-  const reader = res.body?.getReader();
-  if (!reader) {
-    const data = await res.json();
-    const usage = geminiUsage(data?.usageMetadata);
-    if (usage) onUsage?.(usage);
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  }
-
-  const decoder = new TextDecoder();
-  let fullText = '';
-  let buffer = '';
-  let usage: UsageInfo | undefined;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          const chunks = parsed?.candidates?.[0]?.content?.parts || [];
-          for (const part of chunks) {
-            if (part?.text) {
-              fullText += part.text;
-              onChunk(part.text);
-            }
-          }
-          usage = geminiUsage(parsed?.usageMetadata) ?? usage;
-        } catch {
-          // Skip unparseable chunks
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  if (usage) onUsage?.(usage);
   return fullText;
 }
 
@@ -984,7 +902,7 @@ async function fetchOpenAICompatibleModelsRaw(
   }
   const modelsPath = baseUrl.endsWith('/v1') ? '/models' : '/v1/models';
   const url = `${baseUrl.replace(/\/+$/, '')}${modelsPath}${queryString ? `?${queryString}` : ''}`;
-  const res = await fetch(url, { headers });
+  const res = await fetchOrThrow(url, { headers }, `${provider} models API`);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`Failed to fetch models from ${provider} (${res.status}): ${text.slice(0, 500)}`);
@@ -1035,24 +953,34 @@ export async function fetchAvailableModels(
       return models.map((m) => m.id as string);
     }
     case 'anthropic': {
-      const res = await fetch('https://api.anthropic.com/v1/messages/models', {
+      // The models endpoint is /v1/models (not /v1/messages/models), and it
+      // returns { data: [{ id, display_name, ... }] } — models are keyed by
+      // `id`, which is what the Messages API wants back as `model`. `limit`
+      // defaults to 20, so ask for the full list in one request.
+      //
+      // This runs in the renderer, so the request is cross-origin: Anthropic
+      // rejects browser-originated calls unless they opt in with the same
+      // header the SDK sets under dangerouslyAllowBrowser.
+      const res = await fetchOrThrow('https://api.anthropic.com/v1/models?limit=1000', {
         headers: {
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
           'Content-Type': 'application/json',
         },
-      });
+      }, 'Anthropic models API');
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new Error(`Failed to fetch models from Anthropic (${res.status}): ${text.slice(0, 500)}`);
       }
       const data = await res.json();
-      return (data.models as { name: string }[] | undefined)?.map(m => m.name) || [];
+      return (data.data as { id: string }[] | undefined)?.map(m => m.id) || [];
     }
     case 'gemini': {
-      const res = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models',
+      const res = await fetchOrThrow(
+        'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
         { headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' } },
+        'Gemini models API',
       );
       if (!res.ok) {
         const text = await res.text().catch(() => '');
@@ -1067,7 +995,7 @@ export async function fetchAvailableModels(
         .map(m => m.name.replace('models/', '')) || [];
     }
     case 'ollama': {
-      const res = await fetch(`${baseUrl}/api/tags`);
+      const res = await fetchOrThrow(`${baseUrl.replace(/\/+$/, '')}/api/tags`, {}, 'Ollama models API');
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new Error(`Failed to fetch models from Ollama (${res.status}): ${text.slice(0, 500)}`);

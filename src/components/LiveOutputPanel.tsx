@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, memo } from 'react';
 
 interface LiveOutputPanelProps {
   currentFile: string;
@@ -7,17 +7,25 @@ interface LiveOutputPanelProps {
   convertingPage: { current: number; total: number } | null;
   isAudio: boolean;
   output: string;
+  /**
+   * The conversion has finished and this panel is showing the final result
+   * rather than a stream in progress. It stays mounted in that state until new
+   * input is loaded, so the text can still be read and copied.
+   */
+  isComplete: boolean;
 }
 
-export default function LiveOutputPanel({
+function LiveOutputPanel({
   currentFile,
   currentFileIndex,
   totalFiles,
   convertingPage,
   isAudio,
   output,
+  isComplete,
 }: LiveOutputPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -26,11 +34,18 @@ export default function LiveOutputPanel({
     }
   }, [output]);
 
+  // Clear the pending "Copied!" reset on unmount, so it can't fire a state
+  // update against an unmounted component.
+  useEffect(() => () => {
+    if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+  }, []);
+
   const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(output);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => setCopied(false), 2000);
     } catch {
       // ignore
     }
@@ -38,13 +53,15 @@ export default function LiveOutputPanel({
 
   const isSingleImage = totalFiles === 0;
 
+  const label = isComplete
+    ? (isSingleImage ? 'Converted' : `${totalFiles} file${totalFiles === 1 ? '' : 's'} converted`)
+    : (isSingleImage ? 'Converting' : `File ${currentFileIndex + 1}/${totalFiles}`);
+
   return (
     <div className="live-output-panel">
       <div className="live-output-panel__header">
         <div className="live-output-panel__info">
-          <span className="live-output-panel__file">
-            {isSingleImage ? 'Converting' : `File ${currentFileIndex + 1}/${totalFiles}`}
-          </span>
+          <span className="live-output-panel__file">{label}</span>
           <span className="live-output-panel__filename">{currentFile}</span>
           {convertingPage && convertingPage.total > 1 && (
             <span className="live-output-panel__page">
@@ -66,9 +83,14 @@ export default function LiveOutputPanel({
         <div
           className="live-output-panel__progress-bar"
           style={{
-            width: convertingPage
-              ? `${(convertingPage.current / convertingPage.total) * 100}%`
-              : '0%',
+            // Held at full once finished. convertingPage is cleared when the
+            // run ends, so without this the bar would snap back to empty just
+            // as the result appears.
+            width: isComplete
+              ? '100%'
+              : convertingPage
+                ? `${(convertingPage.current / convertingPage.total) * 100}%`
+                : '0%',
           }}
         />
       </div>
@@ -83,3 +105,6 @@ export default function LiveOutputPanel({
     </div>
   );
 }
+
+// Memoized: App re-renders on every flushed batch of streamed output.
+export default memo(LiveOutputPanel);

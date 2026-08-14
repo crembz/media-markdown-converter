@@ -3,19 +3,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { convertImageToMarkdown, convertAudioToMarkdown } from './services/llm';
 import { renderPdfPages } from './pdf-node';
-import { isAudioFile, getFileKind, getAudioMimeType } from './utils/fileKind';
+import { isAudioFile, isImageFile, isPdfFile, getFileKind, getAudioMimeType, mimeTypeForPath } from './utils/fileKind';
+import { PROVIDER_DEFAULTS } from './services/providerDefaults';
+import type { AppConfig } from './types';
 
-interface CliConfig {
-  provider: string;
-  model: string;
-  audioModel?: string;
-  apiKey: string;
-  baseUrl: string;
-  useApiKey: boolean;
-  availableModels: string[];
-  outputFolder?: string;
-}
-
+// The on-disk .media-markdown-converter.json shape — everything optional, so
+// it stays distinct from AppConfig (the resolved config the LLM layer takes).
 interface ConfigFile {
   provider?: string;
   model?: string;
@@ -27,60 +20,6 @@ interface ConfigFile {
   outputFolder?: string;
 }
 
-const PROVIDER_DEFAULTS: Record<string, Omit<ConfigFile, 'apiKey' | 'availableModels' | 'outputFolder'>> = {
-  openai: {
-    provider: 'openai',
-    model: 'gpt-4o',
-    audioModel: 'gpt-4o-audio-preview',
-    baseUrl: 'https://api.openai.com',
-    useApiKey: true,
-  },
-  anthropic: {
-    provider: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
-    baseUrl: 'https://api.anthropic.com',
-    useApiKey: true,
-  },
-  'openai-compatible': {
-    provider: 'openai-compatible',
-    model: '',
-    baseUrl: '',
-    useApiKey: true,
-  },
-  lmstudio: {
-    provider: 'lmstudio',
-    model: '',
-    baseUrl: 'http://localhost:1234/v1',
-    useApiKey: false,
-  },
-  gemini: {
-    provider: 'gemini',
-    model: 'gemini-2.5-flash',
-    audioModel: 'gemini-2.5-flash',
-    baseUrl: 'https://generativelanguage.googleapis.com',
-    useApiKey: true,
-  },
-  ollama: {
-    provider: 'ollama',
-    model: '',
-    baseUrl: 'http://localhost:11434',
-    useApiKey: false,
-  },
-  mistral: {
-    provider: 'mistral',
-    model: 'pixtral-large-latest',
-    audioModel: 'voxtral-mini-latest',
-    baseUrl: 'https://api.mistral.ai/v1',
-    useApiKey: true,
-  },
-  openrouter: {
-    provider: 'openrouter',
-    model: '',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    useApiKey: true,
-  },
-};
-
 async function loadConfigFile(): Promise<ConfigFile | null> {
   const configPath = path.join(process.cwd(), '.media-markdown-converter.json');
   try {
@@ -91,32 +30,11 @@ async function loadConfigFile(): Promise<ConfigFile | null> {
   }
 }
 
-function isSupportedImage(filename: string): boolean {
-  const ext = path.extname(filename).toLowerCase();
-  return ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif'].includes(ext);
-}
-
-function isPdfFile(filename: string): boolean {
-  return path.extname(filename).toLowerCase() === '.pdf';
-}
-
 async function loadPages(filePath: string): Promise<string[]> {
-  if (isSupportedImage(filePath)) {
+  if (isImageFile(filePath)) {
     const buffer = await fs.promises.readFile(filePath);
     const base64 = buffer.toString('base64');
-    const ext = path.extname(filePath).toLowerCase();
-    const mimeTypes: Record<string, string> = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.bmp': 'image/bmp',
-      '.webp': 'image/webp',
-      '.tiff': 'image/tiff',
-      '.tif': 'image/tiff',
-    };
-    const mimeType = mimeTypes[ext] || 'image/png';
-    return [`data:${mimeType};base64,${base64}`];
+    return [`data:${mimeTypeForPath(filePath)};base64,${base64}`];
   } else if (isPdfFile(filePath)) {
     return renderPdfPages(filePath);
   } else if (isAudioFile(filePath)) {
@@ -152,7 +70,7 @@ export async function main() {
       process.exit(1);
     }
 
-    if (!isSupportedImage(file) && !isPdfFile(file) && !isAudioFile(file)) {
+    if (!isImageFile(file) && !isPdfFile(file) && !isAudioFile(file)) {
       console.error(`Error: Unsupported file type: ${file}`);
       process.exit(1);
     }
@@ -175,8 +93,10 @@ export async function main() {
     ? true
     : (configFile?.useApiKey ?? defaults.useApiKey) ?? true;
 
-  const config: CliConfig = {
-    provider: opts.provider || configFile?.provider || defaults.provider,
+  // Typed as the real AppConfig rather than a CLI-local look-alike, so the
+  // calls below no longer need `as never` to reach the LLM layer.
+  const config: AppConfig = {
+    provider: (opts.provider || configFile?.provider || defaults.provider) as AppConfig['provider'],
     model: opts.model || configFile?.model || defaults.model,
     audioModel: opts.audioModel || configFile?.audioModel || defaults.audioModel,
     apiKey: opts.apiKey || configFile?.apiKey || '',
@@ -209,7 +129,27 @@ export async function main() {
   let totalConverted = 0;
   let totalFailed = 0;
 
+  // One controller for the whole run, so Ctrl-C actually cancels the in-flight
+  // request. Previously every call got `new AbortController().signal`, which
+  // nothing could ever abort, leaving SIGINT to kill the process mid-write.
+  const abortController = new AbortController();
+  let interrupted = false;
+  const onInterrupt = () => {
+    if (interrupted) process.exit(130);
+    interrupted = true;
+    console.error('\nInterrupted — finishing the current request. Press Ctrl-C again to force quit.');
+    abortController.abort();
+  };
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onInterrupt);
+
+  const onChunk = (chunk: string) => {
+    if (opts.stream) process.stdout.write(chunk);
+  };
+
   for (const filePath of opts.files) {
+    if (interrupted) break;
+
     const filename = path.basename(filePath);
     const baseName = path.basename(filePath, path.extname(filePath));
     const outputPath = path.join(outputDir, `${baseName}.md`);
@@ -222,31 +162,25 @@ export async function main() {
 
       if (getFileKind(filePath) === 'audio') {
         fullResult = await convertAudioToMarkdown(
-          config as never,
+          config,
           pages[0],
           getAudioMimeType(filePath),
-          (chunk) => {
-            if (opts.stream) {
-              process.stdout.write(chunk);
-            }
-          },
-          new AbortController().signal,
+          onChunk,
+          abortController.signal,
         );
       } else {
+        // One request per page, deliberately — a whole document in a single
+        // request would blow a local model's context. Do not batch these.
         for (let i = 0; i < pages.length; i++) {
           if (pages.length > 1) {
             console.log(`  Page ${i + 1}/${pages.length}`);
           }
 
           const pageResult = await convertImageToMarkdown(
-            config as never,
+            config,
             pages[i],
-            (chunk) => {
-              if (opts.stream) {
-                process.stdout.write(chunk);
-              }
-            },
-            new AbortController().signal,
+            onChunk,
+            abortController.signal,
           );
 
           fullResult += pageResult;
@@ -257,12 +191,12 @@ export async function main() {
         }
       }
 
-      if (!opts.stream) {
-        await fs.promises.writeFile(outputPath, fullResult, 'utf-8');
-        console.log(`  Saved to: ${outputPath}`);
-      } else {
-        console.log();
-      }
+      // --stream is about echoing progress to stdout; it used to also silently
+      // discard the output file, so a long transcription could scroll past and
+      // be gone. Always write, whether or not it was streamed.
+      if (opts.stream) console.log();
+      await fs.promises.writeFile(outputPath, fullResult, 'utf-8');
+      console.log(`  Saved to: ${outputPath}`);
 
       totalConverted++;
     } catch (err: unknown) {
@@ -271,5 +205,13 @@ export async function main() {
     }
   }
 
+  // Via the emitter interface: Electron's typings augment `process` with a
+  // narrower off() overload that only accepts its own 'loaded' event.
+  const emitter = process as NodeJS.EventEmitter;
+  emitter.off('SIGINT', onInterrupt);
+  emitter.off('SIGTERM', onInterrupt);
+
   console.log(`\nDone! ${totalConverted} converted, ${totalFailed} failed.`);
+  if (interrupted) process.exitCode = 130;
+  else if (totalFailed > 0) process.exitCode = 1;
 }

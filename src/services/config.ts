@@ -1,95 +1,13 @@
-export interface AppConfig {
-  provider: 'openai' | 'anthropic' | 'openai-compatible' | 'lmstudio' | 'gemini' | 'ollama' | 'mistral' | 'openrouter';
-  model: string;
-  audioModel?: string;
-  apiKey: string;
-  apiKeys?: Record<string, string>;
-  baseUrl: string;
-  baseUrls?: Record<string, string>;
-  useApiKey: boolean;
-  availableModels: string[];
-  audioModels?: string[];
-  modelsByProvider?: Record<string, string>;
-  audioModelsByProvider?: Record<string, string>;
-  outputFolder?: string;
-}
+import type { AppConfig } from '../types';
+import { getDefaultConfig } from './providerDefaults';
 
-const PROVIDER_DEFAULTS: Record<string, Omit<AppConfig, 'apiKey'>> = {
-  openai: {
-    provider: 'openai',
-    model: 'gpt-4o',
-    audioModel: 'gpt-4o-audio-preview',
-    baseUrl: 'https://api.openai.com',
-    useApiKey: true,
-    availableModels: [],
-  },
-  anthropic: {
-    provider: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
-    baseUrl: 'https://api.anthropic.com',
-    useApiKey: true,
-    availableModels: [],
-  },
-  'openai-compatible': {
-    provider: 'openai-compatible',
-    model: '',
-    baseUrl: '',
-    useApiKey: true,
-    availableModels: [],
-  },
-  lmstudio: {
-    provider: 'lmstudio',
-    model: '',
-    baseUrl: 'http://localhost:1234/v1',
-    useApiKey: false,
-    availableModels: [],
-  },
-  gemini: {
-    provider: 'gemini',
-    model: 'gemini-2.5-flash',
-    audioModel: 'gemini-2.5-flash',
-    baseUrl: 'https://generativelanguage.googleapis.com',
-    useApiKey: true,
-    availableModels: [],
-  },
-  ollama: {
-    provider: 'ollama',
-    model: '',
-    baseUrl: 'http://localhost:11434',
-    useApiKey: false,
-    availableModels: [],
-  },
-  mistral: {
-    provider: 'mistral',
-    model: 'pixtral-large-latest',
-    audioModel: 'voxtral-mini-latest',
-    baseUrl: 'https://api.mistral.ai/v1',
-    useApiKey: true,
-    availableModels: [],
-  },
-  openrouter: {
-    provider: 'openrouter',
-    model: '',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    useApiKey: true,
-    availableModels: [],
-  },
-};
-
-export function getDefaultConfig(provider: string): AppConfig {
-  const defaults = PROVIDER_DEFAULTS[provider];
-  if (!defaults) {
-    return {
-      provider: 'openai-compatible' as const,
-      model: '',
-      apiKey: '',
-      baseUrl: '',
-      useApiKey: true,
-      availableModels: [],
-    };
-  }
-  return { ...defaults, apiKey: '', outputFolder: '' };
-}
+// Re-exported so the many `from './services/config'` imports keep working;
+// the definition itself lives in src/types.ts, shared with the main and
+// preload processes.
+export type { AppConfig };
+// Provider defaults live in ./providerDefaults so the CLI can share them
+// (this module uses import.meta.env, which the CLI's CommonJS build rejects).
+export { getDefaultConfig };
 
 export async function loadConfig(): Promise<AppConfig | null> {
   const envProvider = import.meta.env.VITE_LLM_PROVIDER;
