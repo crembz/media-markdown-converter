@@ -1,6 +1,12 @@
 {
   "compilerOptions": {
     "target": "ES2020",
+    // ES2022 lib (not target) for the Error `cause` option; every runtime this
+    // ships on — Electron 28's Chromium and Node 18+ — supports it. DOM is
+    // listed explicitly because naming `lib` at all drops what the ES2020
+    // target used to pull in implicitly, and the shared llm.ts needs it
+    // (fetch, Blob, FormData, and the `window` guard for Electron-only paths).
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "CommonJS",
     "moduleResolution": "node",
     "outDir": "dist-cli",
@@ -14,6 +20,7 @@
   "include": [
     "src/cli.ts",
     "src/pdf-node.ts",
+    "src/pdf-node-globals.ts",
     "src/services/llm.ts",
     "src/utils/prompt.ts",
     "src/utils/fileKind.ts",

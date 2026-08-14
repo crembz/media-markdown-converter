@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, memo } from 'react';
 
 interface ImagePreviewProps {
   image: string;
@@ -42,7 +42,7 @@ function extractDimensions(img: HTMLImageElement): { width: number; height: numb
   };
 }
 
-export default function ImagePreview({ image, onReplace, totalPages, currentPage, onPageChange }: ImagePreviewProps) {
+function ImagePreview({ image, onReplace, totalPages, currentPage, onPageChange }: ImagePreviewProps) {
   const [scale, setScale] = useState<number>(1);
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -156,3 +156,7 @@ export default function ImagePreview({ image, onReplace, totalPages, currentPage
     </div>
   );
 }
+
+// Memoized: the `image` prop is a large data URI and App re-renders often
+// during conversion; without this the preview re-renders on every update.
+export default memo(ImagePreview);

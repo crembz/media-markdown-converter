@@ -1,11 +1,6 @@
-// Polyfill Promise.try for pdfjs-dist
-(globalThis.Promise as any).try = (fn: () => Promise<unknown>) => {
-  try {
-    return Promise.resolve(fn());
-  } catch (e) {
-    return Promise.reject(e);
-  }
-};
+// MUST stay first — installs Promise.try for pdfjs-dist before the App import
+// chain pulls pdfjs in. See src/polyfills.ts for why it can't live here.
+import './polyfills';
 
 import React from 'react';
 import { createRoot } from 'react-dom/client';

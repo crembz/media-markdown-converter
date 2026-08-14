@@ -1,13 +1,35 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppConfig, loadConfig, saveConfig } from './services/config';
 import { convertImageToMarkdown, convertAudioToMarkdown, mergeUsage, UsageInfo } from './services/llm';
 import { renderPdfPages } from './utils/pdf';
-import { getFileKind, getAudioMimeType } from './utils/fileKind';
+import { getFileKind, getAudioMimeType, type FileKind } from './utils/fileKind';
+import { PAGE_SEPARATOR, stripExtension, timestampedMarkdownName } from './utils/markdown';
+import type { BatchFile, MediaFileType } from './types';
 import ImageUploader from './components/ImageUploader';
 import ImagePreview from './components/ImagePreview';
 import StatusBar from './components/StatusBar';
 import ConfigPanel from './components/ConfigPanel';
 import LiveOutputPanel from './components/LiveOutputPanel';
+import BatchFileList from './components/BatchFileList';
+
+type ConflictStrategy = 'rename' | 'overwrite' | 'skip';
+
+/**
+ * One file to convert. The batch and single-file flows used to run two
+ * near-identical ~100-line loops; both now describe their work as jobs and
+ * share one loop. `loadPages` is deferred so batch entries are only read from
+ * disk when their turn comes.
+ */
+interface ConversionJob {
+  filename: string;
+  kind: FileKind;
+  /** Index into batchFiles, so the list can highlight the current file. */
+  index: number;
+  loadPages: () => Promise<string[]>;
+  /** Set for batch entries, which are read from disk; undefined for a file
+   *  dropped straight into the window. Lets long audio be split by path. */
+  sourcePath?: string;
+}
 
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -19,7 +41,7 @@ export default function App() {
   const [isMaximized, setIsMaximized] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [convertingPage, setConvertingPage] = useState<{ current: number; total: number } | null>(null);
-  const [batchFiles, setBatchFiles] = useState<Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' } | null>>([]);
+  const [batchFiles, setBatchFiles] = useState<Array<BatchFile | null>>([]);
   const [currentFileIndex, setCurrentFileIndex] = useState(0);
   const [batchStatus, setBatchStatus] = useState<'idle' | 'processing' | 'done' | 'error'>('idle');
   const [filesConverted, setFilesConverted] = useState(0);
@@ -27,25 +49,56 @@ export default function App() {
   const [filesFailed, setFilesFailed] = useState(0);
   const outputFolder = config?.outputFolder || null;
   const [currentFilename, setCurrentFilename] = useState<string | null>(null);
-  const [conflictStrategy, setConflictStrategy] = useState<'rename' | 'overwrite' | 'skip' | null>(null);
   const [existingFiles, setExistingFiles] = useState<string[]>([]);
   const [showConflictDialog, setShowConflictDialog] = useState(false);
   const [liveOutput, setLiveOutput] = useState('');
   const [usageInfo, setUsageInfo] = useState<UsageInfo | null>(null);
-  const currentPartialRef = useRef('');
-  const conflictStrategyRef = useRef(conflictStrategy);
+
+  // Read (not subscribed to) inside handleConvert, which the conflict dialog
+  // calls immediately after setting them — state wouldn't be visible yet.
+  // conflictStrategy is a ref only: it was previously mirrored from state that
+  // nothing ever set to a non-null value, so the mirroring effect never fired
+  // and the ref kept the previous run's strategy forever.
+  const conflictStrategyRef = useRef<ConflictStrategy | null>(null);
   const existingFilesRef = useRef(existingFiles);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const createStreamCallback = useCallback((totalPages: number) => {
-    return (chunk: string) => {
-      currentPartialRef.current += chunk;
-      setLiveOutput(prev => {
-        const separator = totalPages > 1 && prev.length > 0 ? '\n\n---\n\n' : '';
-        return prev + separator + currentPartialRef.current;
-      });
-    };
+  // Streamed deltas are coalesced and flushed once per animation frame.
+  // Applying every chunk immediately re-rendered the whole app per token.
+  const pendingChunksRef = useRef('');
+  const flushHandleRef = useRef<number | null>(null);
+
+  const cancelPendingChunks = useCallback(() => {
+    if (flushHandleRef.current !== null) {
+      cancelAnimationFrame(flushHandleRef.current);
+      flushHandleRef.current = null;
+    }
+    pendingChunksRef.current = '';
   }, []);
+
+  const handleStreamChunk = useCallback((chunk: string) => {
+    pendingChunksRef.current += chunk;
+    if (flushHandleRef.current !== null) return;
+
+    flushHandleRef.current = requestAnimationFrame(() => {
+      flushHandleRef.current = null;
+      const pending = pendingChunksRef.current;
+      pendingChunksRef.current = '';
+      if (pending) setLiveOutput((prev) => prev + pending);
+    });
+  }, []);
+
+  /**
+   * Replaces the live output with an authoritative value (end of page, end of
+   * file, or a reset). Drops any queued deltas first — otherwise a pending
+   * flush could land afterwards and re-append text already included here.
+   */
+  const setLiveOutputNow = useCallback((text: string) => {
+    cancelPendingChunks();
+    setLiveOutput(text);
+  }, [cancelPendingChunks]);
+
+  useEffect(() => cancelPendingChunks, [cancelPendingChunks]);
 
   // Accumulates usage across every request the current file's conversion
   // makes (e.g. one per page for a multi-page PDF) so the total shown
@@ -62,10 +115,6 @@ export default function App() {
   const handleAudioProgress = useCallback((current: number, total: number) => {
     setConvertingPage({ current, total });
   }, []);
-
-  useEffect(() => {
-    conflictStrategyRef.current = conflictStrategy;
-  }, [conflictStrategy]);
 
   useEffect(() => {
     existingFilesRef.current = existingFiles;
@@ -89,117 +138,107 @@ export default function App() {
     };
   }, []);
 
-  const handleImageLoaded = useCallback((dataUri: string, filename: string) => {
-    setPages([dataUri]);
-    setCurrentPage(0);
-    setError(null);
-    setBatchFiles([]);
-    setBatchStatus('idle');
-    setFilesConverted(0);
-    setFilesSkipped(0);
-    setFilesFailed(0);
-    setCurrentFilename(filename);
-    setConflictStrategy(null);
-    setExistingFiles([]);
-    setShowConflictDialog(false);
-  }, []);
-
-  const handlePdfLoaded = useCallback((pdfPages: string[], filename: string) => {
-    setPages(pdfPages);
-    setCurrentPage(0);
-    setError(null);
-    setBatchFiles([]);
-    setBatchStatus('idle');
-    setFilesConverted(0);
-    setFilesSkipped(0);
-    setFilesFailed(0);
-    setCurrentFilename(filename);
-    setConflictStrategy(null);
-    setExistingFiles([]);
-    setShowConflictDialog(false);
-  }, []);
-
-  const handleAudioLoaded = useCallback((dataUri: string, filename: string) => {
-    setPages([dataUri]);
-    setCurrentPage(0);
-    setError(null);
-    setBatchFiles([]);
-    setBatchStatus('idle');
-    setFilesConverted(0);
-    setFilesSkipped(0);
-    setFilesFailed(0);
-    setCurrentFilename(filename);
-    setConflictStrategy(null);
-    setExistingFiles([]);
-    setShowConflictDialog(false);
-  }, []);
-
-  const handleFilesSelected = useCallback((files: Array<{ filePath: string; filename: string; fileType: 'image' | 'pdf' | 'audio' }>) => {
-    setPages([]);
-    setCurrentPage(0);
-    setError(null);
-    setBatchFiles(files);
-    setCurrentFileIndex(0);
-    setBatchStatus('idle');
-    setFilesConverted(0);
-    setFilesSkipped(0);
-    setFilesFailed(0);
-    setCurrentFilename(null);
-    setConflictStrategy(null);
-    setExistingFiles([]);
-    setShowConflictDialog(false);
-  }, []);
-
-  const handleRemoveImage = useCallback(() => {
-    setPages([]);
+  // Shared by every "new input arrived" handler; they previously repeated
+  // these eleven setters almost verbatim.
+  const resetConversionState = useCallback(() => {
     setCurrentPage(0);
     setError(null);
     setConvertingPage(null);
-    setBatchFiles([]);
     setBatchStatus('idle');
     setFilesConverted(0);
     setFilesSkipped(0);
     setFilesFailed(0);
-    setLiveOutput('');
-    setConflictStrategy(null);
+    setUsageInfo(null);
+    setLiveOutputNow('');
+    conflictStrategyRef.current = null;
     setExistingFiles([]);
     setShowConflictDialog(false);
-  }, []);
+  }, [setLiveOutputNow]);
 
-  const loadPagesFromPath = useCallback(async (filePath: string, fileType: 'image' | 'pdf' | 'audio'): Promise<string[]> => {
-    if (!filePath) return [];
+  const handleSingleFileLoaded = useCallback((loadedPages: string[], filename: string) => {
+    resetConversionState();
+    setPages(loadedPages);
+    setBatchFiles([]);
+    setCurrentFilename(filename);
+  }, [resetConversionState]);
+
+  const handleImageLoaded = useCallback((dataUri: string, filename: string) => {
+    handleSingleFileLoaded([dataUri], filename);
+  }, [handleSingleFileLoaded]);
+
+  const handlePdfLoaded = useCallback((pdfPages: string[], filename: string) => {
+    handleSingleFileLoaded(pdfPages, filename);
+  }, [handleSingleFileLoaded]);
+
+  const handleAudioLoaded = useCallback((dataUri: string, filename: string) => {
+    handleSingleFileLoaded([dataUri], filename);
+  }, [handleSingleFileLoaded]);
+
+  const handleFilesSelected = useCallback((files: BatchFile[]) => {
+    resetConversionState();
+    setPages([]);
+    setBatchFiles(files);
+    setCurrentFileIndex(0);
+    setCurrentFilename(null);
+  }, [resetConversionState]);
+
+  const handleRemoveImage = useCallback(() => {
+    resetConversionState();
+    setPages([]);
+    setBatchFiles([]);
+    setCurrentFilename(null);
+  }, [resetConversionState]);
+
+  const loadPagesFromPath = useCallback(async (filePath: string, fileType: MediaFileType): Promise<string[]> => {
+    // Returning [] here made a pathless entry look like a zero-page document:
+    // the conversion loop did nothing and the file was neither written nor
+    // reported. Fail loudly instead — callers already handle the rejection.
+    if (!filePath) {
+      throw new Error('This file has no readable path. Load it again with "Browse Files".');
+    }
 
     if (fileType === 'pdf') {
-      const base64 = await window.electronAPI.readFileAsBase64(filePath);
-      const base64Data = base64.indexOf(',') !== -1 ? base64.slice(base64.indexOf(',') + 1) : base64;
-      const byteString = atob(base64Data);
-      const ab = new ArrayBuffer(byteString.length);
-      const ia = new Uint8Array(ab);
-      for (let i = 0; i < byteString.length; i++) {
-        ia[i] = byteString.charCodeAt(i);
-      }
-      const pdfFile = new File([ab], 'document.pdf', { type: 'application/pdf' });
-      return renderPdfPages(pdfFile);
-    } else {
-      const dataUri = await window.electronAPI.readFileAsBase64(filePath);
-      return [dataUri];
+      // Raw bytes straight into pdfjs. This used to come back as a base64
+      // data URI that was decoded here with a per-character loop and wrapped
+      // in a File — an extra encode, decode and copy of the whole document.
+      const bytes = await window.electronAPI.readFileBytes(filePath);
+      return renderPdfPages(bytes);
     }
+
+    return [await window.electronAPI.readFileAsBase64(filePath)];
   }, []);
 
   const handleConvert = useCallback(async () => {
-    if (!config) return;
+    if (!config || !outputFolder) return;
 
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
+    abortControllerRef.current?.abort();
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
-    const currentStrategy = conflictStrategyRef.current;
-    const currentExisting = existingFilesRef.current;
+    const strategy = conflictStrategyRef.current;
+    const existing = existingFilesRef.current;
     // Tracked locally rather than read back from filesFailed state, since
     // state updates aren't visible synchronously within this same closure.
     let hadFailure = false;
+
+    const jobs: ConversionJob[] = batchFiles.length > 0
+      ? batchFiles.flatMap((file, index) => (file
+        ? [{
+          filename: file.filename,
+          kind: (file.fileType === 'audio' ? 'audio' : 'document') as FileKind,
+          index,
+          loadPages: () => loadPagesFromPath(file.filePath, file.fileType),
+          sourcePath: file.filePath,
+        }]
+        : []))
+      : currentFilename
+        ? [{
+          filename: currentFilename,
+          kind: getFileKind(currentFilename),
+          index: 0,
+          loadPages: async () => pages,
+        }]
+        : [];
 
     setIsProcessing(true);
     setError(null);
@@ -207,196 +246,101 @@ export default function App() {
     setFilesConverted(0);
     setFilesSkipped(0);
     setFilesFailed(0);
-    setLiveOutput('');
+    setLiveOutputNow('');
 
     try {
-      if (batchFiles.length > 0) {
-        for (let f = 0; f < batchFiles.length; f++) {
-          if (abortController.signal.aborted) break;
+      for (const job of jobs) {
+        if (abortController.signal.aborted) break;
 
-          const file = batchFiles[f];
-          if (!file) continue;
+        const baseName = stripExtension(job.filename);
+        const mdName = `${baseName}.md`;
 
-          const baseName = file.filename.replace(/\.[^/.]+$/, '');
-          const mdName = `${baseName}.md`;
-          const outputPath = outputFolder + '/' + mdName;
+        if (strategy === 'skip' && existing.includes(mdName)) {
+          setFilesSkipped((prev) => prev + 1);
+          continue;
+        }
 
-          if (currentStrategy === 'skip' && currentExisting.includes(mdName)) {
-            setFilesSkipped((prev) => prev + 1);
-            continue;
-          }
+        setCurrentFileIndex(job.index);
 
-          setCurrentFileIndex(f);
+        try {
+          const jobPages = await job.loadPages();
+          setConvertingPage({ current: 1, total: jobPages.length });
+          setUsageInfo(null);
+          // Each file's live output stands alone, so clear the previous
+          // file's text rather than streaming this one onto the end of it.
+          setLiveOutputNow('');
 
-          try {
-            const pages = await loadPagesFromPath(file.filePath, file.fileType);
-            setConvertingPage({ current: 1, total: pages.length });
-            setUsageInfo(null);
+          let result = '';
 
-            let fileResult = '';
+          if (job.kind === 'audio') {
+            result = await convertAudioToMarkdown(
+              config,
+              jobPages[0],
+              getAudioMimeType(job.filename),
+              handleStreamChunk,
+              abortController.signal,
+              handleUsage,
+              handleAudioProgress,
+              job.sourcePath,
+            );
+            setLiveOutputNow(result);
+          } else {
+            // One request per page, deliberately — sending a whole document at
+            // once would exhaust a local model's context. Do not batch these.
+            for (let p = 0; p < jobPages.length; p++) {
+              if (abortController.signal.aborted) break;
 
-            if (file.fileType === 'audio') {
-              currentPartialRef.current = '';
-              const streamCallback = createStreamCallback(1);
+              setConvertingPage({ current: p + 1, total: jobPages.length });
 
-              fileResult = await convertAudioToMarkdown(
+              result += await convertImageToMarkdown(
                 config,
-                pages[0],
-                getAudioMimeType(file.filename),
-                streamCallback,
+                jobPages[p],
+                handleStreamChunk,
                 abortController.signal,
                 handleUsage,
-                handleAudioProgress,
               );
 
-              currentPartialRef.current = '';
-              setLiveOutput(fileResult);
-            } else {
-              for (let p = 0; p < pages.length; p++) {
-                if (abortController.signal.aborted) break;
+              if (p < jobPages.length - 1) result += PAGE_SEPARATOR;
 
-                setConvertingPage({ current: p + 1, total: pages.length });
-
-                currentPartialRef.current = '';
-                const pageStreamCallback = createStreamCallback(pages.length);
-
-                const pageResult = await convertImageToMarkdown(
-                  config,
-                  pages[p],
-                  pageStreamCallback,
-                  abortController.signal,
-                  handleUsage,
-                );
-
-                fileResult += pageResult;
-                currentPartialRef.current = '';
-
-                if (p < pages.length - 1) {
-                  fileResult += '\n\n---\n\n';
-                }
-
-                setLiveOutput(fileResult);
-              }
+              setLiveOutputNow(result);
             }
-
-            if (!abortController.signal.aborted && fileResult && outputFolder) {
-              if (currentStrategy === 'rename' && currentExisting.includes(mdName)) {
-                const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-                const renameMdName = `${baseName}_${timestamp}.md`;
-                await window.electronAPI.writeFile(outputFolder + '/' + renameMdName, fileResult);
-              } else {
-                await window.electronAPI.writeFile(outputPath, fileResult);
-              }
-              setFilesConverted((prev) => prev + 1);
-            }
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : 'An unknown error occurred';
-            console.error(`Failed to convert ${file.filename}:`, err);
-            setError(message);
-            setFilesFailed((prev) => prev + 1);
-            hadFailure = true;
           }
-        }
 
-        if (!abortController.signal.aborted) {
-          // A failure shouldn't leave the Convert button permanently
-          // disabled (batchStatus === 'done' disables it) — falling back to
-          // 'error' here lets the user retry immediately instead of having
-          // to reload/replace the file(s) just to reset the status.
-          setBatchStatus(hadFailure ? 'error' : 'done');
-          setConflictStrategy(null);
-          setExistingFiles([]);
-        } else {
-          setBatchStatus('error');
+          if (abortController.signal.aborted) break;
+
+          // An empty result used to fall through every branch: not written,
+          // not counted as converted, not counted as failed — the file simply
+          // vanished from the summary. Treat it as a failure instead.
+          if (!result) {
+            throw new Error(`No text was produced for ${job.filename}`);
+          }
+
+          const targetName = strategy === 'rename' && existing.includes(mdName)
+            ? timestampedMarkdownName(baseName)
+            : mdName;
+
+          // Always awaited inside this try/catch: a failed write must land in
+          // filesFailed, never silently count as converted.
+          await window.electronAPI.writeFile(`${outputFolder}/${targetName}`, result);
+          setFilesConverted((prev) => prev + 1);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'An unknown error occurred';
+          console.error(`Failed to convert ${job.filename}:`, err);
+          setError(message);
+          setFilesFailed((prev) => prev + 1);
+          hadFailure = true;
         }
+      }
+
+      if (abortController.signal.aborted) {
+        setBatchStatus('error');
       } else {
-        if (!abortController.signal.aborted && outputFolder && currentFilename) {
-          const baseName = currentFilename.replace(/\.[^/.]+$/, '');
-          const mdName = `${baseName}.md`;
-
-          if (currentStrategy === 'skip' && currentExisting.includes(mdName)) {
-            setFilesSkipped((prev) => prev + 1);
-          } else {
-            try {
-              setConvertingPage({ current: 1, total: pages.length });
-              setUsageInfo(null);
-
-              let fullResult = '';
-              const kind = getFileKind(currentFilename);
-
-              if (kind === 'audio') {
-                currentPartialRef.current = '';
-                const streamCallback = createStreamCallback(1);
-
-                fullResult = await convertAudioToMarkdown(
-                  config,
-                  pages[0],
-                  getAudioMimeType(currentFilename),
-                  streamCallback,
-                  abortController.signal,
-                  handleUsage,
-                  handleAudioProgress,
-                );
-
-                currentPartialRef.current = '';
-                setLiveOutput(fullResult);
-              } else {
-                for (let i = 0; i < pages.length; i++) {
-                  if (abortController.signal.aborted) break;
-
-                  setConvertingPage({ current: i + 1, total: pages.length });
-
-                  currentPartialRef.current = '';
-                  const pageStreamCallback = createStreamCallback(pages.length);
-
-                  const pageResult = await convertImageToMarkdown(
-                    config,
-                    pages[i],
-                    pageStreamCallback,
-                    abortController.signal,
-                    handleUsage,
-                  );
-
-                  fullResult += pageResult;
-                  currentPartialRef.current = '';
-
-                  if (i < pages.length - 1) {
-                    fullResult += '\n\n---\n\n';
-                  }
-
-                  setLiveOutput(fullResult);
-                }
-              }
-
-              if (!abortController.signal.aborted && fullResult) {
-                if (currentStrategy === 'rename' && currentExisting.includes(mdName)) {
-                  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-                  const renameMdName = `${baseName}_${timestamp}.md`;
-                  await window.electronAPI.writeFile(outputFolder + '/' + renameMdName, fullResult);
-                } else {
-                  await window.electronAPI.writeFile(outputFolder + '/' + mdName, fullResult);
-                }
-                setFilesConverted((prev) => prev + 1);
-              }
-            } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : 'An unknown error occurred';
-              console.error(`Failed to convert ${currentFilename}:`, err);
-              setError(message);
-              setFilesFailed((prev) => prev + 1);
-              hadFailure = true;
-            }
-          }
-        }
-
-        if (!abortController.signal.aborted) {
-          // Same reasoning as the batch branch above: don't let a failed
-          // conversion leave the Convert button disabled.
-          setBatchStatus(hadFailure ? 'error' : 'done');
-          setConflictStrategy(null);
-          setExistingFiles([]);
-        } else {
-          setBatchStatus('error');
-        }
+        // A failure shouldn't leave the Convert button permanently disabled
+        // (batchStatus === 'done' disables it) — falling back to 'error' lets
+        // the user retry immediately instead of reloading the file(s).
+        setBatchStatus(hadFailure ? 'error' : 'done');
+        conflictStrategyRef.current = null;
+        setExistingFiles([]);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'An unknown error occurred';
@@ -409,7 +353,10 @@ export default function App() {
       setConvertingPage(null);
       abortControllerRef.current = null;
     }
-  }, [config, pages, batchFiles, outputFolder, currentFilename, loadPagesFromPath]);
+  }, [
+    config, pages, batchFiles, outputFolder, currentFilename, loadPagesFromPath,
+    handleStreamChunk, handleUsage, handleAudioProgress, setLiveOutputNow,
+  ]);
 
   const handleAbort = useCallback(() => {
     abortControllerRef.current?.abort();
@@ -428,15 +375,13 @@ export default function App() {
     if (typeof window.electronAPI === 'undefined') return;
     if (!outputFolder) return;
 
-    const isBatch = batchFiles.length > 0;
-    const targetFiles = isBatch
-      ? batchFiles.filter(Boolean).map(f => `${f!.filename.replace(/\.[^/.]+$/, '')}.md`)
-      : currentFilename ? [`${currentFilename.replace(/\.[^/.]+$/, '')}.md`] : [];
+    const targetFiles = batchFiles.length > 0
+      ? batchFiles.flatMap((f) => (f ? [`${stripExtension(f.filename)}.md`] : []))
+      : currentFilename ? [`${stripExtension(currentFilename)}.md`] : [];
 
     const existing: string[] = [];
     for (const filename of targetFiles) {
-      const exists = await window.electronAPI.fileExists(outputFolder + '/' + filename);
-      if (exists) {
+      if (await window.electronAPI.fileExists(`${outputFolder}/${filename}`)) {
         existing.push(filename);
       }
     }
@@ -460,10 +405,40 @@ export default function App() {
     }
   }, []);
 
+  const handleSelectBatchFile = useCallback(async (index: number) => {
+    const file = batchFiles[index];
+    if (!file) return;
+
+    setCurrentFileIndex(index);
+    try {
+      const loaded = await loadPagesFromPath(file.filePath, file.fileType);
+      setPages(loaded);
+      setCurrentPage(0);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to load file preview');
+    }
+  }, [batchFiles, loadPagesFromPath]);
+
+  const dismissConflictDialog = useCallback(() => {
+    setShowConflictDialog(false);
+    conflictStrategyRef.current = null;
+    setExistingFiles([]);
+  }, []);
+
+  const startWithStrategy = useCallback((strategy: ConflictStrategy) => {
+    conflictStrategyRef.current = strategy;
+    setShowConflictDialog(false);
+    void handleConvert();
+  }, [handleConvert]);
+
   const hasPages = pages.length > 0;
   const hasBatchFiles = batchFiles.length > 0;
   const currentImage = hasPages ? pages[currentPage] ?? pages[0]! : null;
   const isMac = typeof window.electronAPI !== 'undefined' && window.electronAPI.platform === 'darwin';
+  const validFileCount = useMemo(
+    () => batchFiles.reduce((n, file) => (file ? n + 1 : n), 0),
+    [batchFiles],
+  );
 
   // Which model is/will be used for whatever's currently loaded — audio
   // files use the separate audioModel (falling back to model, matching
@@ -471,9 +446,48 @@ export default function App() {
   const currentFileKind = hasBatchFiles
     ? batchFiles[currentFileIndex]?.fileType ?? null
     : currentFilename ? getFileKind(currentFilename) : null;
+  const isAudio = currentFileKind === 'audio';
   const activeModel = config
-    ? (currentFileKind === 'audio' ? (config.audioModel || config.model) : config.model)
+    ? (isAudio ? (config.audioModel || config.model) : config.model)
     : null;
+
+  // The panel stays up after a successful run so the result can be read and
+  // copied, and is torn down only when new input arrives — every "file
+  // loaded" handler runs resetConversionState, which puts batchStatus back to
+  // 'idle'. A run that produced no text (everything skipped) has nothing to
+  // show, so it doesn't linger. A failed run isn't held open either: the
+  // status bar carries the error, and the Convert button stays enabled.
+  const showLiveOutput = batchStatus === 'processing'
+    || (batchStatus === 'done' && liveOutput.length > 0);
+
+  // Rendered once and placed into either layout below. Both branches used to
+  // carry their own full copy of this tree.
+  const mainContent = hasBatchFiles ? (
+    <BatchFileList
+      files={batchFiles}
+      currentIndex={currentFileIndex}
+      showClear={!hasPages && !pdfLoading}
+      onSelect={handleSelectBatchFile}
+      onClear={handleRemoveImage}
+    />
+  ) : (!hasPages || pdfLoading) ? (
+    <ImageUploader
+      onImageSelect={handleImageLoaded}
+      onPdfSelect={handlePdfLoaded}
+      onAudioSelect={handleAudioLoaded}
+      onFilesSelected={handleFilesSelected}
+      onLoadingState={setPdfLoading}
+      onError={setError}
+    />
+  ) : (
+    <ImagePreview
+      image={currentImage!}
+      onReplace={handleRemoveImage}
+      totalPages={pages.length}
+      currentPage={currentPage}
+      onPageChange={setCurrentPage}
+    />
+  );
 
   return (
     <div className="container">
@@ -504,150 +518,21 @@ export default function App() {
       </div>
 
       <div className="main-panel">
-        {batchStatus === 'processing' ? (
+        {showLiveOutput ? (
           <div className="main-panel__split">
-            <div className="main-panel__content">
-              {hasBatchFiles ? (
-                <div className="batch-view">
-                  <div className="batch-view__header">
-                    <span className="batch-view__count">
-                      {batchFiles.filter(Boolean).length} files loaded
-                    </span>
-                    {!hasPages && !pdfLoading && (
-                      <button
-                        className="btn-secondary batch-view__clear"
-                        onClick={handleRemoveImage}
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                  <div className="batch-view__content">
-                    {batchFiles.map((file, index) => (
-                      <div
-                        key={index}
-                        className={`batch-file ${file ? 'batch-file--valid' : 'batch-file--error'} ${currentFileIndex === index ? 'batch-file--current' : ''}`}
-                        onClick={async () => {
-                          if (file) {
-                            setCurrentFileIndex(index);
-                            try {
-                              const pages = await loadPagesFromPath(file.filePath, file.fileType);
-                              setPages(pages);
-                              setCurrentPage(0);
-                            } catch (err: unknown) {
-                              setError(err instanceof Error ? err.message : 'Failed to load file preview');
-                            }
-                          }
-                        }}
-                      >
-                        <span className="batch-file__name">{file?.filename ?? 'Failed to load'}</span>
-                        <span className="batch-file__pages">{file ? (file.fileType === 'pdf' ? 'PDF' : file.fileType === 'audio' ? 'Audio' : 'Image') : 'Failed'}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : !hasPages && !pdfLoading ? (
-                <ImageUploader
-                  onImageSelect={handleImageLoaded}
-                  onPdfSelect={handlePdfLoaded}
-                  onAudioSelect={handleAudioLoaded}
-                  onFilesSelected={handleFilesSelected}
-                  onLoadingState={setPdfLoading}
-                  onError={setError}
-                />
-              ) : pdfLoading ? (
-                <ImageUploader
-                  onImageSelect={handleImageLoaded}
-                  onPdfSelect={handlePdfLoaded}
-                  onAudioSelect={handleAudioLoaded}
-                  onFilesSelected={handleFilesSelected}
-                  onLoadingState={setPdfLoading}
-                  onError={setError}
-                />
-              ) : (
-                <ImagePreview
-                  image={currentImage!}
-                  onReplace={handleRemoveImage}
-                  totalPages={pages.length}
-                  currentPage={currentPage}
-                  onPageChange={setCurrentPage}
-                />
-              )}
-            </div>
+            <div className="main-panel__content">{mainContent}</div>
             <LiveOutputPanel
               currentFile={batchFiles[currentFileIndex]?.filename ?? (currentFilename ?? 'document')}
               currentFileIndex={currentFileIndex}
-              totalFiles={batchFiles.filter(Boolean).length}
+              totalFiles={validFileCount}
               convertingPage={convertingPage}
-              isAudio={currentFileKind === 'audio'}
+              isAudio={isAudio}
               output={liveOutput}
+              isComplete={batchStatus === 'done'}
             />
           </div>
         ) : (
-          <div className="main-panel__content">
-            {hasBatchFiles ? (
-              <div className="batch-view">
-                <div className="batch-view__header">
-                  <span className="batch-view__count">
-                    {batchFiles.filter(Boolean).length} files loaded
-                  </span>
-                  {!hasPages && !pdfLoading && (
-                    <button
-                      className="btn-secondary batch-view__clear"
-                      onClick={handleRemoveImage}
-                    >
-                      Clear
-                    </button>
-                  )}
-                </div>
-                <div className="batch-view__content">
-                  {batchFiles.map((file, index) => (
-                    <div
-                      key={index}
-                      className={`batch-file ${file ? 'batch-file--valid' : 'batch-file--error'} ${currentFileIndex === index ? 'batch-file--current' : ''}`}
-                      onClick={async () => {
-                        if (file) {
-                          setCurrentFileIndex(index);
-                          const pages = await loadPagesFromPath(file.filePath, file.fileType);
-                          setPages(pages);
-                          setCurrentPage(0);
-                        }
-                      }}
-                    >
-                      <span className="batch-file__name">{file?.filename ?? 'Failed to load'}</span>
-                      <span className="batch-file__pages">{file ? (file.fileType === 'pdf' ? 'PDF' : file.fileType === 'audio' ? 'Audio' : 'Image') : 'Failed'}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : !hasPages && !pdfLoading ? (
-              <ImageUploader
-                onImageSelect={handleImageLoaded}
-                onPdfSelect={handlePdfLoaded}
-                onAudioSelect={handleAudioLoaded}
-                onFilesSelected={handleFilesSelected}
-                onLoadingState={setPdfLoading}
-                onError={setError}
-              />
-            ) : pdfLoading ? (
-              <ImageUploader
-                onImageSelect={handleImageLoaded}
-                onPdfSelect={handlePdfLoaded}
-                onAudioSelect={handleAudioLoaded}
-                onFilesSelected={handleFilesSelected}
-                onLoadingState={setPdfLoading}
-                onError={setError}
-              />
-            ) : (
-              <ImagePreview
-                image={currentImage!}
-                onReplace={handleRemoveImage}
-                totalPages={pages.length}
-                currentPage={currentPage}
-                onPageChange={setCurrentPage}
-              />
-            )}
-          </div>
+          <div className="main-panel__content">{mainContent}</div>
         )}
       </div>
 
@@ -657,9 +542,9 @@ export default function App() {
         hasImage={hasPages || hasBatchFiles}
         hasConfig={!!config}
         convertingPage={convertingPage}
-        isAudio={currentFileKind === 'audio'}
+        isAudio={isAudio}
         batchStatus={batchStatus}
-        totalFiles={batchFiles.filter(Boolean).length}
+        totalFiles={validFileCount}
         filesConverted={filesConverted}
         filesSkipped={filesSkipped}
         filesFailed={filesFailed}
@@ -674,19 +559,15 @@ export default function App() {
       />
 
       {showConfig && (
-        <div className="overlay" onClick={() => setShowConfig(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <ConfigPanel
-              config={config}
-              onSave={handleConfigSaved}
-              onClose={() => setShowConfig(false)}
-            />
-          </div>
-        </div>
+        <ConfigPanel
+          config={config}
+          onSave={handleConfigSaved}
+          onClose={() => setShowConfig(false)}
+        />
       )}
 
       {showConflictDialog && (
-        <div className="overlay" onClick={() => { setShowConflictDialog(false); setConflictStrategy(null); setExistingFiles([]); }}>
+        <div className="overlay" onClick={dismissConflictDialog}>
           <div className="modal conflict-dialog" onClick={(e) => e.stopPropagation()}>
             <h2 className="conflict-dialog__title">Existing files found</h2>
             <p className="conflict-dialog__text">
@@ -699,35 +580,14 @@ export default function App() {
             </ul>
             <p className="conflict-dialog__question">How would you like to proceed?</p>
             <div className="conflict-dialog__actions">
-              <button
-                className="btn-secondary"
-                onClick={() => {
-                  conflictStrategyRef.current = 'skip';
-                  setShowConflictDialog(false);
-                  handleConvert();
-                }}
-              >
+              <button className="btn-secondary" onClick={() => startWithStrategy('skip')}>
                 Skip existing files
               </button>
-              <button
-                className="btn-primary"
-                onClick={() => {
-                  conflictStrategyRef.current = 'overwrite';
-                  setShowConflictDialog(false);
-                  handleConvert();
-                }}
-              >
+              <button className="btn-primary" onClick={() => startWithStrategy('overwrite')}>
                 Overwrite existing
               </button>
-              <button
-                className="btn-secondary"
-                onClick={() => {
-                  conflictStrategyRef.current = 'rename';
-                  setShowConflictDialog(false);
-                  handleConvert();
-                }}
-              >
-                Rename & process
+              <button className="btn-secondary" onClick={() => startWithStrategy('rename')}>
+                Rename &amp; process
               </button>
             </div>
           </div>

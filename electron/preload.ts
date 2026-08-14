@@ -1,67 +1,43 @@
+import * as electron from 'electron';
 import { contextBridge, ipcRenderer } from 'electron';
+import type { AppConfig, ElectronAPI } from '../src/types';
 
-export interface Config {
-  provider: string;
-  model: string;
-  audioModel?: string;
-  apiKey: string;
-  apiKeys?: Record<string, string>;
-  baseUrl: string;
-  baseUrls?: Record<string, string>;
-  useApiKey: boolean;
-  availableModels: string[];
-  audioModels?: string[];
-  modelsByProvider?: Record<string, string>;
-  audioModelsByProvider?: Record<string, string>;
-  outputFolder?: string;
-}
+// Both shapes are declared once in src/types.ts; re-exported here so anything
+// importing them from the preload entry point still resolves.
+export type { AppConfig as Config, ElectronAPI };
 
-export interface ElectronAPI {
-  platform: NodeJS.Platform;
-  loadConfig(): Promise<Config | null>;
-  saveConfig(config: Config): Promise<void>;
-  openFileDialog(filters?: string[][]): Promise<string[] | null>;
-  saveFileDialog(defaultPath?: string): Promise<string | null>;
-  readFile(path: string, asBase64?: boolean): Promise<string>;
-  readFileAsBase64(path: string): Promise<string>;
-  writeFile(path: string, content: string): Promise<void>;
-  minimizeWindow(): Promise<void>;
-  maximizeWindow(): Promise<void>;
-  closeWindow(): Promise<void>;
-  isMaximized(): Promise<boolean>;
-  onWindowStateChanged(callback: (data: { maximized: boolean }) => void): () => void;
-  openFolder(path: string): Promise<void>;
-  openDirectoryDialog(): Promise<string | null>;
-  fileExists(path: string): Promise<boolean>;
-  splitAudio(audioBase64: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }>;
-  cleanupTempDir(dirPath: string): Promise<void>;
-}
+// getPathForFile arrived in Electron 29 and is the only way to get a dropped
+// file's path from Electron 32 onward, where the non-standard File.path was
+// removed. This project is still on 28, so neither API is available on both
+// sides of the upgrade — probe for webUtils and fall back. Drop the fallback
+// (and this cast) once the minimum is Electron 29.
+const webUtils = (electron as unknown as {
+  webUtils?: { getPathForFile(file: File): string };
+}).webUtils;
 
 const electronAPI: ElectronAPI = {
   platform: process.platform,
 
-  loadConfig: async (): Promise<Config | null> => {
+  loadConfig: async (): Promise<AppConfig | null> => {
     return ipcRenderer.invoke('load-config');
   },
 
-  saveConfig: async (config: Config): Promise<void> => {
+  saveConfig: async (config: AppConfig): Promise<void> => {
     return ipcRenderer.invoke('save-config', config);
   },
 
-  openFileDialog: async (filters?: string[][]): Promise<string[] | null> => {
-    return ipcRenderer.invoke('open-file-dialog', { filters });
-  },
-
-  saveFileDialog: async (defaultPath?: string): Promise<string | null> => {
-    return ipcRenderer.invoke('save-file-dialog', defaultPath);
-  },
-
-  readFile: async (filePath: string, asBase64 = false): Promise<string> => {
-    return ipcRenderer.invoke('read-file', filePath, asBase64);
+  getPathForFile: (file: File): string => {
+    if (webUtils) return webUtils.getPathForFile(file);
+    // Electron 28 and earlier: the renderer-only File.path extension.
+    return (file as File & { path?: string }).path ?? '';
   },
 
   readFileAsBase64: async (filePath: string): Promise<string> => {
     return ipcRenderer.invoke('read-file-as-base64', filePath);
+  },
+
+  readFileBytes: async (filePath: string): Promise<Uint8Array> => {
+    return ipcRenderer.invoke('read-file-bytes', filePath);
   },
 
   writeFile: async (filePath: string, content: string): Promise<void> => {
@@ -108,6 +84,10 @@ const electronAPI: ElectronAPI = {
 
   splitAudio: async (audioBase64: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }> => {
     return ipcRenderer.invoke('split-audio', audioBase64, chunkSeconds);
+  },
+
+  splitAudioFile: async (filePath: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }> => {
+    return ipcRenderer.invoke('split-audio-file', filePath, chunkSeconds);
   },
 
   cleanupTempDir: async (dirPath: string): Promise<void> => {

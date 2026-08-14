@@ -1,24 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } from 'electron';
 import { promises as fs } from 'fs';
-import { join } from 'path';
+import { isAbsolute, join, normalize, resolve, sep } from 'path';
+import { tmpdir } from 'os';
+// Declared once in src/types.ts, shared with the renderer and preload.
+import type { AppConfig as Config } from '../src/types';
+// Value import — fileKind.ts is a dependency-free leaf module, so this pulls
+// only the MIME tables into the main bundle, not the renderer's graph.
+import { MIME_TYPES, mimeTypeForPath } from '../src/utils/fileKind';
 
 const isDev = process.env.NODE_ENV === 'development';
-
-interface Config {
-  provider: string;
-  model: string;
-  audioModel?: string;
-  apiKey: string;
-  apiKeys?: Record<string, string>;
-  baseUrl: string;
-  baseUrls?: Record<string, string>;
-  useApiKey: boolean;
-  availableModels: string[];
-  audioModels?: string[];
-  modelsByProvider?: Record<string, string>;
-  audioModelsByProvider?: Record<string, string>;
-  outputFolder?: string;
-}
 
 // On-disk shape: apiKey (and every value in apiKeys, the per-provider key
 // map) is replaced with its safeStorage-encrypted form (base64) whenever
@@ -32,6 +22,34 @@ interface StoredConfig extends Omit<Config, 'apiKey' | 'apiKeys'> {
 }
 
 let mainWindow: BrowserWindow | null = null;
+
+// These handlers take paths from the renderer, which renders LLM-generated
+// markdown. The guards below don't assume the renderer is hostile, but they
+// keep a bug or an injection there from turning into arbitrary filesystem
+// access: every path must be absolute and traversal-free, writes are limited
+// to .md files, and reads to the media types the app actually opens.
+
+function assertSafePath(filePath: string, label: string): string {
+  if (typeof filePath !== 'string' || !filePath || !isAbsolute(filePath)) {
+    throw new Error(`${label}: an absolute path is required`);
+  }
+  const normalized = normalize(filePath);
+  if (normalized.split(sep).includes('..')) {
+    throw new Error(`${label}: path traversal is not allowed`);
+  }
+  return normalized;
+}
+
+function assertExtension(filePath: string, allowed: string[], label: string): string {
+  const normalized = assertSafePath(filePath, label);
+  const ext = normalized.slice(normalized.lastIndexOf('.')).toLowerCase();
+  if (!allowed.includes(ext)) {
+    throw new Error(`${label}: unsupported file type "${ext}"`);
+  }
+  return normalized;
+}
+
+const READABLE_EXTENSIONS = Object.keys(MIME_TYPES);
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin';
@@ -187,91 +205,40 @@ ipcMain.handle('save-config', async (_event, config: Config): Promise<void> => {
 
     await fs.writeFile(configPath, JSON.stringify(toStore, null, 2), 'utf-8');
   } catch (error) {
-    throw new Error(`Failed to save config: ${(error as Error).message}`);
+    throw new Error(`Failed to save config: ${(error as Error).message}`, { cause: error });
   }
 });
-
-ipcMain.handle('open-file-dialog', async (_event, options?: Electron.OpenDialogOptions): Promise<string[] | null> => {
-  try {
-    const result = await dialog.showOpenDialog(mainWindow!, {
-      properties: ['openFile', 'multiSelections'],
-      filters: [
-        { name: 'All Supported', extensions: ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff', 'pdf', 'mp3', 'wav', 'm4a', 'flac', 'ogg', 'webm', 'aac'] },
-        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff'] },
-        { name: 'PDF', extensions: ['pdf'] },
-        { name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'flac', 'ogg', 'webm', 'aac'] },
-        { name: 'All Files', extensions: ['*'] },
-      ],
-      ...options,
-    });
-    return result.canceled ? null : result.filePaths;
-  } catch (error) {
-    throw new Error(`File dialog error: ${(error as Error).message}`);
-  }
-});
-
-ipcMain.handle('save-file-dialog', async (_event, defaultPath?: string): Promise<string | null> => {
-  try {
-    const result = await dialog.showSaveDialog(mainWindow!, {
-      defaultPath: defaultPath || 'output.md',
-      filters: [
-        { name: 'Markdown', extensions: ['md'] },
-        { name: 'All Files', extensions: ['*'] },
-      ],
-    });
-    return result.canceled ? null : result.filePath || null;
-  } catch (error) {
-    throw new Error(`Save dialog error: ${(error as Error).message}`);
-  }
-});
-
-ipcMain.handle('read-file', async (_event, filePath: string, asBase64 = false): Promise<string> => {
-  try {
-    if (asBase64) {
-      const buffer = await fs.readFile(filePath);
-      return buffer.toString('base64');
-    }
-    return await fs.readFile(filePath, 'utf-8');
-  } catch (error) {
-    throw new Error(`Failed to read file: ${(error as Error).message}`);
-  }
-});
-
-const MIME_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.bmp': 'image/bmp',
-  '.webp': 'image/webp',
-  '.tiff': 'image/tiff',
-  '.tif': 'image/tiff',
-  '.pdf': 'application/pdf',
-  '.mp3': 'audio/mpeg',
-  '.wav': 'audio/wav',
-  '.m4a': 'audio/mp4',
-  '.flac': 'audio/flac',
-  '.ogg': 'audio/ogg',
-  '.webm': 'audio/webm',
-  '.aac': 'audio/aac',
-};
 
 ipcMain.handle('read-file-as-base64', async (_event, filePath: string): Promise<string> => {
+  filePath = assertExtension(filePath, READABLE_EXTENSIONS, 'read-file-as-base64');
   try {
     const buffer = await fs.readFile(filePath);
-    const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
-    const mimeType = MIME_TYPES[ext] || 'image/png';
-    return `data:${mimeType};base64,` + buffer.toString('base64');
+    return `data:${mimeTypeForPath(filePath)};base64,` + buffer.toString('base64');
   } catch (error) {
-    throw new Error(`Failed to read file: ${(error as Error).message}`);
+    throw new Error(`Failed to read file: ${(error as Error).message}`, { cause: error });
+  }
+});
+
+// Raw bytes for callers that only need the data, not a data URI — skips the
+// base64 encode here and the decode on the renderer side (~33% less to copy
+// across the IPC boundary). Uint8Array survives structured cloning intact.
+ipcMain.handle('read-file-bytes', async (_event, filePath: string): Promise<Uint8Array> => {
+  filePath = assertExtension(filePath, READABLE_EXTENSIONS, 'read-file-bytes');
+  try {
+    const buffer = await fs.readFile(filePath);
+    return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  } catch (error) {
+    throw new Error(`Failed to read file: ${(error as Error).message}`, { cause: error });
   }
 });
 
 ipcMain.handle('write-file', async (_event, filePath: string, content: string): Promise<void> => {
+  // The app only ever writes converted markdown.
+  filePath = assertExtension(filePath, ['.md'], 'write-file');
   try {
     await fs.writeFile(filePath, content, 'utf-8');
   } catch (error) {
-    throw new Error(`Failed to write file: ${(error as Error).message}`);
+    throw new Error(`Failed to write file: ${(error as Error).message}`, { cause: error });
   }
 });
 
@@ -302,7 +269,7 @@ ipcMain.handle('open-directory-dialog', async (): Promise<string | null> => {
     });
     return result.canceled ? null : result.filePaths[0] || null;
   } catch (error) {
-    throw new Error(`Directory dialog error: ${(error as Error).message}`);
+    throw new Error(`Directory dialog error: ${(error as Error).message}`, { cause: error });
   }
 });
 
@@ -330,7 +297,7 @@ ipcMain.handle('open-folder', async (_event, folderPath: string): Promise<void> 
       });
     }
   } catch (error) {
-    throw new Error(`Failed to open folder: ${(error as Error).message}`);
+    throw new Error(`Failed to open folder: ${(error as Error).message}`, { cause: error });
   }
 });
 
@@ -360,7 +327,14 @@ ipcMain.handle('file-exists', async (_event, filePath: string): Promise<boolean>
 // since-removed version of this splitting logic, which held the *entire*
 // recording as raw Float32 PCM at once — a GB+ allocation for anything past
 // ~20-30 minutes that was crashing the renderer outright).
-ipcMain.handle('split-audio', async (_event, audioBase64: string, chunkSeconds: number): Promise<{ dir: string; files: string[] }> => {
+//
+// Two entry points share this: split-audio-file takes a path and hands it
+// straight to ffmpeg, while split-audio takes base64 for callers that only
+// hold the bytes (a single file dropped into the window). Prefer the path
+// form — the base64 form sends the whole recording across IPC, after the
+// renderer already read it from disk through this same process, so a long
+// recording crossed the boundary twice at ~1.33x its size.
+async function splitAudioFile(sourcePath: string, chunkSeconds: number, deleteSource: boolean): Promise<{ dir: string; files: string[] }> {
   const os = await import('os');
   const { spawn } = await import('child_process');
   const ffmpegPath = (await import('ffmpeg-static')).default;
@@ -371,8 +345,7 @@ ipcMain.handle('split-audio', async (_event, audioBase64: string, chunkSeconds: 
   const tempDir = await fs.mkdtemp(join(os.tmpdir(), 'mmc-audio-'));
 
   try {
-    const inputPath = join(tempDir, 'input');
-    await fs.writeFile(inputPath, Buffer.from(audioBase64, 'base64'));
+    const inputPath = sourcePath;
 
     const outputPattern = join(tempDir, 'chunk_%04d.mp3');
     await new Promise<void>((resolve, reject) => {
@@ -395,7 +368,8 @@ ipcMain.handle('split-audio', async (_event, audioBase64: string, chunkSeconds: 
       });
     });
 
-    await fs.unlink(inputPath).catch(() => {});
+    // Only ever removes a temp copy this process wrote; never the user's file.
+    if (deleteSource) await fs.unlink(inputPath).catch(() => {});
 
     const entries = await fs.readdir(tempDir);
     const files = entries.filter((f) => f.endsWith('.mp3')).sort().map((f) => join(tempDir, f));
@@ -407,8 +381,37 @@ ipcMain.handle('split-audio', async (_event, audioBase64: string, chunkSeconds: 
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
+}
+
+ipcMain.handle('split-audio-file', async (_event, filePath: string, chunkSeconds: number) => {
+  return splitAudioFile(assertSafePath(filePath, 'split-audio-file'), chunkSeconds, false);
 });
 
+ipcMain.handle('split-audio', async (_event, audioBase64: string, chunkSeconds: number) => {
+  const os = await import('os');
+  const stagingDir = await fs.mkdtemp(join(os.tmpdir(), 'mmc-audio-in-'));
+  const inputPath = join(stagingDir, 'input');
+  try {
+    await fs.writeFile(inputPath, Buffer.from(audioBase64, 'base64'));
+    return await splitAudioFile(inputPath, chunkSeconds, true);
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+// Recursive delete, so this is the one handler where an unchecked path would
+// be genuinely destructive: it previously removed whatever the renderer named.
+// Confined to the temp directories this process creates.
 ipcMain.handle('cleanup-temp-dir', async (_event, dirPath: string): Promise<void> => {
-  await fs.rm(dirPath, { recursive: true, force: true }).catch(() => {});
+  const target = resolve(assertSafePath(dirPath, 'cleanup-temp-dir'));
+  const tempRoot = resolve(tmpdir());
+
+  if (!target.startsWith(tempRoot + sep)) {
+    throw new Error('cleanup-temp-dir: only directories under the system temp directory can be removed');
+  }
+  if (!target.slice(tempRoot.length + 1).startsWith('mmc-audio-')) {
+    throw new Error('cleanup-temp-dir: only this app\'s own temp directories can be removed');
+  }
+
+  await fs.rm(target, { recursive: true, force: true }).catch(() => {});
 });
