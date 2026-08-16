@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } from 'electron';
-import { promises as fs } from 'fs';
+import { constants as fsConstants, promises as fs } from 'fs';
 import { isAbsolute, join, normalize, resolve, sep } from 'path';
 import { tmpdir } from 'os';
 // Declared once in src/types.ts, shared with the renderer and preload.
@@ -310,6 +310,20 @@ ipcMain.handle('file-exists', async (_event, filePath: string): Promise<boolean>
   }
 });
 
+// ffmpeg-static resolves its binary as `path.join(__dirname, 'ffmpeg')` and
+// does no asar rewriting of its own. In a packaged build __dirname is inside
+// app.asar, so the path it hands back is
+// resources/app.asar/node_modules/ffmpeg-static/ffmpeg. Electron's fs shim
+// makes that path readable (electron-builder's asarUnpack leaves the real
+// bytes in app.asar.unpacked and marks the asar entry unpacked), but spawn()
+// goes to the kernel directly, which walks app.asar — a regular file — as a
+// directory component and fails with ENOTDIR. Point spawn at the unpacked
+// copy instead. Unpackaged runs contain no 'app.asar' segment, so this is a
+// no-op in dev.
+function resolveFfmpegBinary(rawPath: string): string {
+  return rawPath.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`);
+}
+
 // Splits a long audio recording into sequential MP3 chunks via ffmpeg,
 // run here in the main process rather than decoding in the renderer.
 // OpenRouter's dedicated transcription endpoint died on long single
@@ -337,9 +351,17 @@ ipcMain.handle('file-exists', async (_event, filePath: string): Promise<boolean>
 async function splitAudioFile(sourcePath: string, chunkSeconds: number, deleteSource: boolean): Promise<{ dir: string; files: string[] }> {
   const os = await import('os');
   const { spawn } = await import('child_process');
-  const ffmpegPath = (await import('ffmpeg-static')).default;
-  if (!ffmpegPath) {
+  const resolvedFfmpeg = (await import('ffmpeg-static')).default;
+  if (!resolvedFfmpeg) {
     throw new Error('ffmpeg binary not available (ffmpeg-static failed to resolve a path for this platform)');
+  }
+  const ffmpegPath = resolveFfmpegBinary(resolvedFfmpeg);
+  // Surface a missing/unexecutable binary as itself rather than as a bare
+  // spawn errno, which reads as a mystery once the asar indirection is in play.
+  try {
+    await fs.access(ffmpegPath, fsConstants.X_OK);
+  } catch {
+    throw new Error(`ffmpeg binary is missing or not executable at ${ffmpegPath}`);
   }
 
   const tempDir = await fs.mkdtemp(join(os.tmpdir(), 'mmc-audio-'));

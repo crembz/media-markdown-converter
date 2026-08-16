@@ -7,8 +7,9 @@ files:
   - dist/**
   - node_modules/ffmpeg-static/**
 # The ffmpeg binary can't run from inside app.asar — unpack it so it stays a
-# real file on disk at node_modules/ffmpeg-static/ffmpeg (ffmpeg-static's own
-# path resolution already expects this asar/asar.unpacked split).
+# real file on disk under app.asar.unpacked/. ffmpeg-static does NOT account
+# for this split itself: it returns an app.asar path regardless, so main.ts
+# rewrites it to app.asar.unpacked before spawning (see resolveFfmpegBinary).
 asarUnpack:
   - node_modules/ffmpeg-static/**
 icon: build/icon.png

@@ -1,6 +1,6 @@
 {
   "name": "media-markdown-converter",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Convert paper notes and audio recordings to markdown using LLM vision and audio models",
   "author": {
     "name": "Crembz",
